@@ -537,6 +537,66 @@
         en: "Click to select from the found players in your system.",
         uk: "Натисніть, щоб вибрати зі знайдених плеєрів у вашій системі.",
       },
+      app_settings_player_libmpv: {
+        ru: "libmpv (системный mpv)",
+        en: "libmpv (system mpv)",
+        uk: "libmpv (системний mpv)",
+      },
+      mpv_no_binary: {
+        ru: "mpv не найден. Установите mpv (brew install mpv) или укажите путь вручную",
+        en: "mpv not found. Install mpv (brew install mpv) or set the path manually",
+        uk: "mpv не знайдено. Встановіть mpv (brew install mpv) або вкажіть шлях вручну",
+      },
+      mpv_now_playing: {
+        ru: "▶ {title} (продолжено с {time})",
+        en: "▶ {title} (resumed from {time})",
+        uk: "▶ {title} (продовжено з {time})",
+      },
+      mpv_path_title: {
+        ru: "Путь к mpv",
+        en: "mpv path",
+        uk: "Шлях до mpv",
+      },
+      mpv_path_select: {
+        ru: "Выбрать вручную",
+        en: "Choose manually",
+        uk: "Обрати вручну",
+      },
+      mpv_path_custom: {
+        ru: "Вручную: {path}",
+        en: "Custom: {path}",
+        uk: "Вручну: {path}",
+      },
+      mpv_path_auto: {
+        ru: "Авто: {path}",
+        en: "Auto: {path}",
+        uk: "Авто: {path}",
+      },
+      mpv_path_reset: {
+        ru: "Сбросить к автопоиску",
+        en: "Reset to auto-detect",
+        uk: "Скинути до автопошуку",
+      },
+      mpv_uosc_title: {
+        ru: "Интерфейс uosc в mpv",
+        en: "uosc interface in mpv",
+        uk: "Інтерфейс uosc в mpv",
+      },
+      mpv_uosc_description: {
+        ru: "Современный OSD для mpv. Требует mpv 0.35+. Применяется при следующем запуске.",
+        en: "Modern OSD for mpv. Requires mpv 0.35+. Applies on next launch.",
+        uk: "Сучасний OSD для mpv. Потрібен mpv 0.35+. Застосовується при наступному запуску.",
+      },
+      mpv_fullscreen_title: {
+        ru: "mpv на весь экран",
+        en: "mpv fullscreen",
+        uk: "mpv на весь екран",
+      },
+      mpv_fullscreen_description: {
+        ru: "Запускать mpv сразу в полноэкранном режиме. Применяется при следующем запуске.",
+        en: "Launch mpv directly in fullscreen. Applies on next launch.",
+        uk: "Запускати mpv одразу в повноекранному режимі. Застосовується при наступному запуску.",
+      },
       app_settings_keyboard_section: {
         ru: "Выбор клавиатуры",
         en: "Keyboard selection",
@@ -769,7 +829,8 @@
         }, 0);
       },
     });
-    if (!Lampa.Platform.macOS()) {
+    // libmpv is selected here as well — show on macOS too
+    {
       Lampa.SettingsApi.addParam({
         component: "player",
         param: {
@@ -838,6 +899,154 @@
             var anchor = $('div[data-name="player_nw_path"]');
             if (anchor.length) anchor.after(element);
           }, 0);
+        },
+      });
+    }
+
+    if (Lampa.Platform.macOS()) {
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_path",
+          type: "button",
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_path_title"),
+          description: Lampa.Lang.translate("mpv_no_binary"),
+        },
+        onChange: async () => {
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (!mpv) {
+            Lampa.Noty.show(
+              Lampa.Lang.translate("mpv_no_binary"),
+              "error",
+              5000,
+            );
+            return;
+          }
+          var info = null;
+          try {
+            info = await mpv.getPath();
+          } catch (err) {
+            console.error("APP Failed to get mpv path", err);
+          }
+          var current =
+            info && info.path
+              ? Lampa.Lang.translate(
+                  info.source === "custom"
+                    ? "mpv_path_custom"
+                    : "mpv_path_auto",
+                ).replace("{path}", info.path)
+              : Lampa.Lang.translate("mpv_no_binary");
+          Lampa.Select.show({
+            title: current,
+            items: [
+              {
+                title: Lampa.Lang.translate("mpv_path_select"),
+                action: "manual",
+              },
+              {
+                title: Lampa.Lang.translate("mpv_path_reset"),
+                action: "reset",
+              },
+            ],
+            onSelect: async (item) => {
+              var result = null;
+              if (item.action === "manual") {
+                result = await mpv.selectPathDialog();
+              } else {
+                result = await mpv.setPath("");
+              }
+              if (result && result.message) Lampa.Noty.show(result.message);
+              Lampa.Settings.update();
+              Lampa.Controller.toggle("settings_component");
+            },
+            onBack: () => {
+              Lampa.Controller.toggle("settings_component");
+            },
+          });
+        },
+        onRender: function (element) {
+          setTimeout(async function () {
+            try {
+              var mpv = window.electronAPI && window.electronAPI.mpv;
+              if (!mpv || typeof mpv.getPath !== "function") return;
+              var info = await mpv.getPath();
+              if (info && info.path) {
+                element
+                  .find(".settings-param__descr")
+                  .text(
+                    Lampa.Lang.translate(
+                      info.source === "custom"
+                        ? "mpv_path_custom"
+                        : "mpv_path_auto",
+                    ).replace("{path}", info.path),
+                  );
+              }
+            } catch (err) {
+              console.error("APP Failed to get mpv path", err);
+            }
+          }, 0);
+        },
+      });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_uosc",
+          type: "trigger",
+          default: true,
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_uosc_title"),
+          description: Lampa.Lang.translate("mpv_uosc_description"),
+        },
+        onChange: async function (value) {
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (mpv && typeof mpv.setUosc === "function") {
+            try {
+              await mpv.setUosc(value === "true");
+            } catch (err) {
+              console.error("APP Failed to set uosc", err);
+            }
+          }
+        },
+        onRender: function (element) {
+          setTimeout(async function () {
+            try {
+              var mpv = window.electronAPI && window.electronAPI.mpv;
+              if (!mpv || typeof mpv.getUosc !== "function") return;
+              var info = await mpv.getUosc();
+              if (info && !info.supported) {
+                element
+                  .find(".settings-param__descr")
+                  .text("mpv " + (info.version || "?") + " < " + info.minVersion);
+              }
+            } catch (err) {
+              console.error("APP Failed to get uosc info", err);
+            }
+          }, 0);
+        },
+      });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_fullscreen",
+          type: "trigger",
+          default: true,
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_fullscreen_title"),
+          description: Lampa.Lang.translate("mpv_fullscreen_description"),
+        },
+        onChange: async function (value) {
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (mpv && typeof mpv.setFullscreen === "function") {
+            try {
+              await mpv.setFullscreen(value === "true");
+            } catch (err) {
+              console.error("APP Failed to set mpv fullscreen", err);
+            }
+          }
         },
       });
     }
@@ -1559,7 +1768,8 @@
             });
           },
         });
-      if (!Lampa.Platform.macOS()) {
+      // libmpv is selected here as well — show on macOS too
+      {
         settingsManager.addToQueue({
           component: "app_settings_player_find",
           order: 5.5,
@@ -3008,10 +3218,323 @@
     };
   }
 
+  function isLibmpvSelected() {
+    try {
+      if (localStorage.getItem("player_desktop_mpv") === "libmpv")
+        return true;
+    } catch {
+      // ignore
+    }
+    try {
+      return Lampa.Storage.get("player_desktop_mpv") === "libmpv";
+    } catch {
+      return false;
+    }
+  }
+
+  function formatMpvTime(sec) {
+    var total = Math.max(0, Math.floor(Number(sec) || 0));
+    var minutes = Math.floor(total / 60);
+    var seconds = total % 60;
+    return (
+      (minutes < 10 ? "0" + minutes : "" + minutes) +
+      ":" +
+      (seconds < 10 ? "0" + seconds : "" + seconds)
+    );
+  }
+
+  // Intercept Lampa.Player for system mpv (macOS, JSON IPC).
+  // playlist() arrives as a separate call after play(), so aggregate via setTimeout 0.
+  function initMpvHook() {
+    if (initMpvHook.done) return;
+    if (
+      !Lampa.Player ||
+      typeof Lampa.Player.play !== "function" ||
+      typeof Lampa.Player.playlist !== "function"
+    ) {
+      if (initMpvHook.attempts < 10) {
+        initMpvHook.attempts += 1;
+        setTimeout(initMpvHook, 1000);
+      }
+      return;
+    }
+    initMpvHook.done = true;
+
+    var origPlay = Lampa.Player.play.bind(Lampa.Player);
+    var origPlaylist = Lampa.Player.playlist.bind(Lampa.Player);
+    var pendingPlay = null;
+    var pendingList = null;
+    var playTimer = null;
+    var handlersByHash = {};
+    var currentHash = null;
+
+    function cleanPlaylist(list) {
+      if (!Array.isArray(list)) return [];
+      return list
+        .filter(function (item) {
+          return (
+            item &&
+            typeof item.url === "string" &&
+            /^https?:\/\//i.test(item.url)
+          );
+        })
+        .map(function (item) {
+          var copy = {};
+          for (var key in item) {
+            if (
+              key !== "playlist" &&
+              Object.prototype.hasOwnProperty.call(item, key)
+            ) {
+              copy[key] = item[key];
+            }
+          }
+          return copy;
+        });
+    }
+
+    function findPlaylistIndex(list, data) {
+      if (!data) return 0;
+      var i;
+      for (i = 0; i < list.length; i++) {
+        if (list[i].url && data.url && list[i].url === data.url) return i;
+      }
+      if (data.season != null && data.episode != null) {
+        for (i = 0; i < list.length; i++) {
+          if (
+            list[i].season === data.season &&
+            list[i].episode === data.episode
+          )
+            return i;
+        }
+      }
+      return 0;
+    }
+
+    function sendExternal(data) {
+      if (Lampa.Player.listener) {
+        Lampa.Player.listener.send("external", data);
+      }
+    }
+
+    function sanitizeItemForIpc(item) {
+      var safe = {
+        title: typeof item.title === "string" ? item.title : "",
+        url: item.url,
+      };
+      if (item.season != null) safe.season = item.season;
+      if (item.episode != null) safe.episode = item.episode;
+      var itemHash =
+        item.hash != null
+          ? item.hash
+          : item.timeline && item.timeline.hash != null
+            ? item.timeline.hash
+            : null;
+      if (itemHash != null) safe.hash = itemHash;
+      if (item.timeline && typeof item.timeline === "object") {
+        safe.timeline = {};
+        if (item.timeline.hash != null) safe.timeline.hash = item.timeline.hash;
+        if (item.timeline.time != null)
+          safe.timeline.time = Number(item.timeline.time) || 0;
+        if (item.timeline.duration != null)
+          safe.timeline.duration = Number(item.timeline.duration) || 0;
+        if (item.timeline.percent != null)
+          safe.timeline.percent = Number(item.timeline.percent) || 0;
+      }
+      return safe;
+    }
+
+    function rememberHandler(item) {
+      if (
+        item &&
+        item.timeline &&
+        item.timeline.hash != null &&
+        typeof item.timeline.handler === "function"
+      ) {
+        handlersByHash[String(item.timeline.hash)] = item.timeline.handler;
+        currentHash = String(item.timeline.hash);
+      }
+    }
+
+    function refreshHandlersFromPlaylist() {
+      try {
+        var live =
+          Lampa.PlayerPlaylist &&
+          typeof Lampa.PlayerPlaylist.get === "function"
+            ? Lampa.PlayerPlaylist.get()
+            : null;
+        if (Array.isArray(live)) live.forEach(rememberHandler);
+      } catch {
+        // ignore — handlers stay as-is
+      }
+    }
+
+    function sendToMpv(data, list) {
+      if (
+        !data ||
+        typeof data.url !== "string" ||
+        !/^https?:\/\//i.test(data.url)
+      ) {
+        return origPlay(data);
+      }
+      var mpv = window.electronAPI && window.electronAPI.mpv;
+      if (!mpv || typeof mpv.play !== "function") {
+        Lampa.Noty.show(Lampa.Lang.translate("mpv_no_binary"), "error", 5000);
+        return origPlay(data);
+      }
+      var cleaned = cleanPlaylist(list);
+      var start = Number((data.timeline && data.timeline.time) || 0) || 0;
+      var hash = data.timeline && data.timeline.hash;
+      rememberHandler(data);
+      cleaned.forEach(rememberHandler);
+      if (cleaned.length) origPlaylist(cleaned);
+      var ipcPlaylist = cleaned.map(sanitizeItemForIpc);
+      var request = mpv.play({
+        url: data.url,
+        title: typeof data.title === "string" ? data.title : "",
+        start: start,
+        hash: hash,
+        playlist: ipcPlaylist,
+        index: findPlaylistIndex(cleaned, data),
+      });
+      if (request && typeof request.then === "function") {
+        request.then(function (result) {
+          if (!result || result.success === false) {
+            console.error(
+              "APP mpv.play failed",
+              result && result.error ? result.error : result,
+            );
+            Lampa.Noty.show(
+              Lampa.Lang.translate("mpv_no_binary"),
+              "error",
+              5000,
+            );
+          }
+        });
+      }
+      if (request && typeof request.catch === "function") {
+        request.catch(function (err) {
+          console.error(
+            "APP mpv.play failed",
+            (err && (err.message || err.error)) || err,
+          );
+        });
+      }
+      sendExternal(data);
+      if (start > 0) {
+        Lampa.Noty.show(
+          Lampa.Lang.translate("mpv_now_playing")
+            .replace("{title}", data.title || "")
+            .replace("{time}", formatMpvTime(start)),
+        );
+      }
+    }
+
+    Lampa.Player.play = function (data) {
+      if (!isLibmpvSelected()) return origPlay(data);
+      pendingPlay = data;
+      pendingList = null;
+      clearTimeout(playTimer);
+      playTimer = setTimeout(function () {
+        var current = pendingPlay;
+        var list =
+          pendingList ||
+          (current && current.playlist) ||
+          (Lampa.PlayerPlaylist &&
+          typeof Lampa.PlayerPlaylist.get === "function"
+            ? Lampa.PlayerPlaylist.get()
+            : []);
+        pendingPlay = null;
+        pendingList = null;
+        if (current) sendToMpv(current, list || []);
+      }, 0);
+    };
+
+    Lampa.Player.playlist = function (list) {
+      if (!isLibmpvSelected()) return origPlaylist(list);
+      pendingList = list;
+      return origPlaylist(list);
+    };
+
+    // mpv -> Lampa: timecodes and playback end (throttled on the main side)
+    try {
+      var mpvApi = window.electronAPI && window.electronAPI.mpv;
+      if (mpvApi) {
+        if (typeof mpvApi.onTime === "function") {
+          mpvApi.onTime(function (progress) {
+            if (!progress) return;
+            var key =
+              progress.hash != null ? String(progress.hash) : currentHash;
+            var handler = key != null ? handlersByHash[key] : null;
+            if (typeof handler !== "function") {
+              // Handler for the new episode may arrive with the next
+              // Player.play/select call — refresh from the live playlist
+              refreshHandlersFromPlaylist();
+              handler = key != null ? handlersByHash[key] : null;
+            }
+            if (typeof handler === "function") {
+              handler(progress.percent, progress.time, progress.duration);
+            }
+          });
+        }
+        if (typeof mpvApi.onEnded === "function") {
+          mpvApi.onEnded(function () {
+            if (Lampa.Player.listener) {
+              Lampa.Player.listener.send("destroy", {});
+            }
+          });
+        }
+      }
+    } catch (err) {
+      console.error("APP Failed to subscribe to mpv events", err);
+    }
+
+    // Lampa UI -> mpv: episode pick and next/prev buttons send 'select' with position
+    try {
+      if (
+        Lampa.PlayerPlaylist &&
+        Lampa.PlayerPlaylist.listener &&
+        typeof Lampa.PlayerPlaylist.listener.follow === "function"
+      ) {
+        Lampa.PlayerPlaylist.listener.follow("select", function (event) {
+          if (!isLibmpvSelected()) return;
+          if (event && event.item && event.item.timeline) {
+            if (
+              event.item.timeline.hash != null &&
+              typeof event.item.timeline.handler === "function"
+            ) {
+              handlersByHash[String(event.item.timeline.hash)] =
+                event.item.timeline.handler;
+              currentHash = String(event.item.timeline.hash);
+            }
+          }
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (
+            mpv &&
+            typeof mpv.playAt === "function" &&
+            event &&
+            typeof event.position === "number"
+          ) {
+            var request = mpv.playAt(event.position);
+            if (request && typeof request.catch === "function") {
+              request.catch(function (err) {
+                console.error("APP mpv.playAt failed", err);
+              });
+            }
+          }
+        });
+      }
+    } catch (err) {
+      console.error("APP Failed to subscribe to playlist", err);
+    }
+  }
+  initMpvHook.done = false;
+  initMpvHook.attempts = 0;
+
   function init() {
     overwriteToggleFullscreen(); // Переопределение функции Utils.toggleFullscreen
     addQuitButton(); // Кнопка выхода в шапке
     addAppSettings(); // Настройки приложения внутри лампы
+    initMpvHook(); // Player interception for system mpv (macOS)
     initInputManager();
   }
 

@@ -140,6 +140,7 @@
   "files": [
     "src/**/*",
     "node_modules/*",
+    "assets/mpv-uosc/**/*",
     "build/icon.svg",
     "build/icon.png",
     "build/icons/**/*"

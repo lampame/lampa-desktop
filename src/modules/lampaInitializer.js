@@ -44,8 +44,9 @@ class LampaInitializer {
 
   async initializePlayerPath(mainWindow) {
     try {
+      // On macOS resolve system mpv instead of skipping the search
       if (process.platform === "darwin") {
-        console.log(`🍏 MacOS поиск плееров не требуется`);
+        await this.initializeDarwinLibmpv(mainWindow);
         return;
       }
 
@@ -126,6 +127,46 @@ class LampaInitializer {
         }, 3000);
       `);
     }
+  }
+
+  // Resolve system mpv on macOS (option B — no bundling)
+  async initializeDarwinLibmpv(mainWindow) {
+    const mpv = await playerFinder.findPlayer("libmpv");
+
+    if (mpv) {
+      console.log(`✅ Found system mpv: ${mpv.path}`);
+
+      await mainWindow.webContents.executeJavaScript(`
+        localStorage.setItem('player_desktop_mpv', 'libmpv');
+        localStorage.setItem('player_torrent', 'other');
+
+        if (window.Lampa && window.Lampa.Storage) {
+          window.Lampa.Storage.set('player_desktop_mpv', 'libmpv');
+          window.Lampa.Storage.set('player_torrent', 'other');
+        }
+
+        setTimeout(() => {
+          if (window.Lampa && window.Lampa.Noty) {
+            window.Lampa.Noty.show('✅ System mpv ready', 'success', 5000);
+          }
+        }, 3000);
+      `);
+      return;
+    }
+
+    console.warn("⚠️ System mpv not found");
+
+    await mainWindow.webContents.executeJavaScript(`
+      setTimeout(() => {
+        if (window.Lampa && window.Lampa.Noty) {
+          window.Lampa.Noty.show(
+            '⚠️ mpv not found! Install via brew install mpv or set the path manually',
+            'warning',
+            10000
+          );
+        }
+      }, 3000);
+    `);
   }
 }
 

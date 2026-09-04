@@ -123,6 +123,21 @@ const PLAYERS = {
       },
     },
   },
+  libmpv: {
+    name: "libmpv (system mpv)",
+    description: "mpv via JSON IPC (brew install mpv)",
+    platforms: {
+      win32: { paths: [] },
+      darwin: {
+        paths: [
+          "/opt/homebrew/bin/mpv",
+          "/usr/local/bin/mpv",
+          "/Applications/mpv.app/Contents/MacOS/mpv",
+        ],
+      },
+      linux: { paths: [] },
+    },
+  },
 };
 
 class PlayerFinder {
@@ -137,6 +152,22 @@ class PlayerFinder {
     console.log(`🔍 Поиск плееров на ${platform}...`);
 
     for (const [playerId, playerInfo] of Object.entries(PLAYERS)) {
+      // Custom mpv path takes priority (same as in findPlayer)
+      if (playerId === "libmpv") {
+        const customPath = store.get("mpvPath", "");
+        if (customPath && existsSync(customPath)) {
+          this.foundPlayers.set(playerId, {
+            id: playerId,
+            name: playerInfo.name,
+            description: playerInfo.description,
+            path: customPath,
+            source: "custom",
+          });
+          console.log(`✅ Found ${playerInfo.name}: ${customPath} (custom)`);
+          continue;
+        }
+      }
+
       const platformPaths = playerInfo.platforms[platform];
       if (!platformPaths || !platformPaths.paths.length) continue;
 
@@ -173,6 +204,20 @@ class PlayerFinder {
     const player = PLAYERS[playerId];
     if (!player) return null;
 
+    // Custom mpv path takes priority over system paths
+    if (playerId === "libmpv") {
+      const customPath = store.get("mpvPath", "");
+      if (customPath && existsSync(customPath)) {
+        return {
+          id: playerId,
+          name: player.name,
+          description: player.description,
+          path: customPath,
+          source: "custom",
+        };
+      }
+    }
+
     const platform = process.platform;
     const platformPaths = player.platforms[platform];
 
@@ -195,6 +240,17 @@ class PlayerFinder {
   async getDefaultPlayer() {
     if (this.foundPlayers.size === 0) {
       await this.findAllPlayers();
+    }
+
+    // On macOS default to libmpv when the binary is available
+    if (
+      process.platform === "darwin" &&
+      this.foundPlayers.has("libmpv") &&
+      (!this.defaultPlayerId || this.defaultPlayerId === "vlc")
+    ) {
+      this.defaultPlayerId = "libmpv";
+      store.set("defaultPlayer", "libmpv");
+      return this.foundPlayers.get("libmpv");
     }
 
     if (!this.defaultPlayerId && this.foundPlayers.size > 0) {

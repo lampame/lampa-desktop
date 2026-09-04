@@ -26,7 +26,10 @@ const store = new Store({
     tsAutoStart: false,
     tsPort: 8090,
     tsUseGst: false,
-    defaultPlayer: "vlc",
+    defaultPlayer: "vlc", // on darwin the libmpv default is resolved in playerFinder/lampaInitializer, not here
+    mpvPath: "",
+    mpvUosc: true,
+    mpvFullscreen: true,
   },
 });
 

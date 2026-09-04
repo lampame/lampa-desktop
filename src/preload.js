@@ -157,6 +157,37 @@ contextBridge.exposeInMainWorld("electronAPI", {
     setDefaultAndSave: (playerId) =>
       ipcRenderer.invoke("player-set-default-and-save", playerId),
   },
+
+  // System mpv (JSON IPC, option B)
+  mpv: {
+    play: (params) => ipcRenderer.invoke("mpv-play", params),
+    setPlaylist: (list) => ipcRenderer.invoke("mpv-playlist", list),
+    playAt: (index) => ipcRenderer.invoke("mpv-play-at", index),
+    seek: (sec) => ipcRenderer.invoke("mpv-seek", sec),
+    stop: () => ipcRenderer.invoke("mpv-stop"),
+    status: () => ipcRenderer.invoke("mpv-status"),
+    getPath: () => ipcRenderer.invoke("mpv-get-path"),
+    setPath: (customPath) => ipcRenderer.invoke("mpv-set-path", customPath),
+    selectPathDialog: () => ipcRenderer.invoke("mpv-select-path-dialog"),
+    getUosc: () => ipcRenderer.invoke("mpv-get-uosc"),
+    setUosc: (enabled) => ipcRenderer.invoke("mpv-set-uosc", enabled),
+    getFullscreen: () => ipcRenderer.invoke("mpv-get-fullscreen"),
+    setFullscreen: (enabled) => ipcRenderer.invoke("mpv-set-fullscreen", enabled),
+    onTime: (callback) => {
+      const subscription = (event, data) => callback(data);
+      ipcRenderer.on("mpv-time", subscription);
+      return () => {
+        ipcRenderer.removeListener("mpv-time", subscription);
+      };
+    },
+    onEnded: (callback) => {
+      const subscription = (event, data) => callback(data);
+      ipcRenderer.on("mpv-ended", subscription);
+      return () => {
+        ipcRenderer.removeListener("mpv-ended", subscription);
+      };
+    },
+  },
 });
 
 console.log("Preload script loaded successfully");

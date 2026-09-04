@@ -11,6 +11,7 @@ const registerCloudHandlers = require("./cloudHandlers");
 const registerTorrServerHandlers = require("./torrServerHandlers");
 const registerFolderHandlers = require("./folderHandlers");
 const registerPlayerHandlers = require("./playerHandlers");
+const registerMpvHandlers = require("./mpvHandlers");
 const registerOtherHandlers = require("./otherHandlers");
 
 function registerIpcHandlers() {
@@ -37,6 +38,9 @@ function registerIpcHandlers() {
 
   // Плееры
   registerPlayerHandlers();
+
+  // System mpv (JSON IPC)
+  registerMpvHandlers(getMainWindow);
 
   // Дополнительные обработчики
   registerOtherHandlers();
