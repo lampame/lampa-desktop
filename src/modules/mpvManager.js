@@ -26,13 +26,20 @@ const SYSTEM_PATHS = [
   "/Applications/mpv.app/Contents/MacOS/mpv",
 ];
 
-const TIME_THROTTLE_MS = 2000;
+// How often at most we push a progress report to Lampa (mpv emits
+// time-pos ~4x/sec; Lampa only needs a smooth 1/sec tick to update bars).
+const TIME_THROTTLE_MS = 1000;
 const SOCKET_CONNECT_RETRIES = 15;
 const SOCKET_CONNECT_DELAY_MS = 200;
 const QUIT_GRACE_MS = 1500;
 const UOSC_MIN_MAJOR = 0;
 const UOSC_MIN_MINOR = 35;
 const UOSC_VERSION_TIMEOUT_MS = 5000;
+// Fallback polling of time-pos/duration/playlist-pos. observe_property is
+// the primary source, but a second, low-frequency get_property loop (like
+// dev/mpv.js does) guarantees timecodes keep flowing even if property
+// events are missed or dropped by mpv on a track change.
+const POLL_MS = 1000;
 
 let cachedPath = null;
 let cachedSource = null;
@@ -74,7 +81,7 @@ function cleanupSocketFile(sockPath) {
   }
 }
 
-// Remove stale lampa-mpv-* sockets from /tmp (after crashes)
+// Remove stale lampa-mpv-* sockets/playlists from /tmp (after crashes)
 function cleanupStaleSockets() {
   if (process.platform === "win32") return;
   let files = [];
@@ -84,10 +91,12 @@ function cleanupStaleSockets() {
     return;
   }
   for (const file of files) {
-    if (!file.startsWith("lampa-mpv-") || !file.endsWith(".sock")) continue;
+    if (!file.startsWith("lampa-mpv-")) continue;
+    if (!file.endsWith(".sock") && !file.endsWith(".m3u")) continue;
     const full = path.join(os.tmpdir(), file);
-    // Do not touch our own current socket
+    // Do not touch our own current socket/playlist
     if (manager.sockPath && full === manager.sockPath) continue;
+    if (manager.playlistFile && full === manager.playlistFile) continue;
     try {
       unlinkSync(full);
     } catch {
@@ -97,9 +106,7 @@ function cleanupStaleSockets() {
 }
 
 function parseMpvVersion(output) {
-  const match = /mpv\s+v?(\d+)\.(\d+)(?:\.(\d+))?/i.exec(
-    String(output || ""),
-  );
+  const match = /mpv\s+v?(\d+)\.(\d+)(?:\.(\d+))?/i.exec(String(output || ""));
   if (!match) return null;
   return {
     major: Number(match[1]),
@@ -112,9 +119,7 @@ function parseMpvVersion(output) {
 function isUoscSupported(version) {
   if (!version) return false;
   if (version.major > UOSC_MIN_MAJOR) return true;
-  return (
-    version.major === UOSC_MIN_MAJOR && version.minor >= UOSC_MIN_MINOR
-  );
+  return version.major === UOSC_MIN_MAJOR && version.minor >= UOSC_MIN_MINOR;
 }
 
 // Vendored uosc assets: dev -> <repo>/assets/mpv-uosc,
@@ -122,10 +127,7 @@ function isUoscSupported(version) {
 function resolveUoscSourceDir() {
   const candidates = [];
   try {
-    if (
-      typeof process.resourcesPath === "string" &&
-      process.resourcesPath
-    ) {
+    if (typeof process.resourcesPath === "string" && process.resourcesPath) {
       candidates.push(
         path.join(process.resourcesPath, "app", "assets", "mpv-uosc"),
       );
@@ -161,9 +163,13 @@ function prepareUoscConfigDir() {
     mkdirSync(path.join(dir, "scripts"), { recursive: true });
     mkdirSync(path.join(dir, "fonts"), { recursive: true });
     mkdirSync(path.join(dir, "script-opts"), { recursive: true });
-    cpSync(path.join(source, "scripts", "uosc"), path.join(dir, "scripts", "uosc"), {
-      recursive: true,
-    });
+    cpSync(
+      path.join(source, "scripts", "uosc"),
+      path.join(dir, "scripts", "uosc"),
+      {
+        recursive: true,
+      },
+    );
     for (const font of ["uosc_icons.otf", "uosc_textures.ttf"]) {
       const from = path.join(source, "fonts", font);
       if (existsSync(from)) cpSync(from, path.join(dir, "fonts", font));
@@ -191,6 +197,61 @@ function cleanupUoscDir(dir) {
   }
 }
 
+// Human-readable title for mpv OSD/playlist. Returns '' when nothing
+// usable is available (caller falls back to mpv defaults or the URL tail).
+function mpvDisplayTitle(item) {
+  const raw = item && typeof item.title === "string" ? item.title.trim() : "";
+  if (raw && !/^https?:\/\//i.test(raw)) return raw.slice(0, 300);
+  const s = item && item.season != null ? Number(item.season) : NaN;
+  const e = item && item.episode != null ? Number(item.episode) : NaN;
+  if (Number.isFinite(s) && s > 0 && Number.isFinite(e) && e > 0) {
+    return `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`;
+  }
+  return "";
+}
+
+function urlTail(url) {
+  const s = String(url || "");
+  const noQuery = s.split("?")[0];
+  const tail = noQuery.slice(noQuery.lastIndexOf("/") + 1);
+  try {
+    return decodeURIComponent(tail).slice(0, 120) || s.slice(0, 120);
+  } catch {
+    return (tail || s).slice(0, 120);
+  }
+}
+
+// Temporary .m3u with #EXTINF titles so mpv shows episode names in its
+// own playlist / OSD (next/prev are native mpv features — there is no
+// separate playlist UI in this app).
+function writeM3uPlaylist(filePath, items) {
+  const lines = ["#EXTM3U"];
+  // Some sources give every episode the same generic title (the show name),
+  // which would freeze the OSD header on one label. When titles collide,
+  // append SxxExx (or at least a running number) so each entry is distinct.
+  const seen = {};
+  for (const item of items) {
+    let title = (mpvDisplayTitle(item) || urlTail(item && item.url)).replace(
+      /[\r\n]+/g,
+      " ",
+    );
+    if (seen[title]) {
+      const s = item && item.season != null ? Number(item.season) : NaN;
+      const e = item && item.episode != null ? Number(item.episode) : NaN;
+      const tag =
+        Number.isFinite(s) && s > 0 && Number.isFinite(e) && e > 0
+          ? `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`
+          : "";
+      if (tag) title = `${title} — ${tag}`;
+      else title = `${title} (${seen[title]})`;
+    }
+    seen[title] = (seen[title] || 0) + 1;
+    lines.push(`#EXTINF:-1,${title}`);
+    lines.push(item.url);
+  }
+  writeFileSync(filePath, lines.join("\n"), "utf8");
+}
+
 function sendToWindow(channel, data) {
   try {
     const win = getMainWindow();
@@ -214,14 +275,19 @@ const manager = {
   paused: false,
   lastSentAt: 0,
   buffer: "",
-  base: 0,
-  internalPos: 0,
-  pendingSeek: null,
-  quitTimer: null,
+  // Resume (continue-watching) position for the CURRENT file. Passed to mpv
+  // as a per-file `start=+N` loadfile option (so it never leaks onto other
+  // episodes) and re-applied via IPC if mpv drops it.
+  resumeTarget: 0,
+  resumeAttempts: 0,
+  lastResumeSeekAt: 0,
   eofGuardAt: 0,
   eofGuardIndex: -1,
+  internalPos: 0,
   uoscDir: null,
   uoscActive: false,
+  playlistFile: null,
+  pollTimer: null,
 
   // Path resolution: custom -> system paths -> which. Result is cached in memory.
   resolvePath(force = false) {
@@ -235,7 +301,9 @@ const manager = {
         cacheFilled = true;
         return cachedPath;
       }
-      console.error(`⚠️ [mpv] custom path invalid: ${custom}, falling back to auto-detect`);
+      console.error(
+        `⚠️ [mpv] custom path invalid: ${custom}, falling back to auto-detect`,
+      );
     }
 
     for (const candidate of SYSTEM_PATHS) {
@@ -289,7 +357,9 @@ const manager = {
       };
       const timer = setTimeout(() => finish(null), UOSC_VERSION_TIMEOUT_MS);
       try {
-        const proc = spawn(target, ["--version"], { stdio: ["ignore", "pipe", "ignore"] });
+        const proc = spawn(target, ["--version"], {
+          stdio: ["ignore", "pipe", "ignore"],
+        });
         let output = "";
         if (proc.stdout) {
           proc.stdout.on("data", (chunk) => {
@@ -319,14 +389,18 @@ const manager = {
       enabled: Boolean(enabled),
       supported,
       active: Boolean(this.uoscActive),
-      version: version ? `${version.major}.${version.minor}.${version.patch}` : null,
+      version: version
+        ? `${version.major}.${version.minor}.${version.patch}`
+        : null,
       minVersion: `${UOSC_MIN_MAJOR}.${UOSC_MIN_MINOR}.0`,
     };
   },
 
   async setUoscEnabled(enabled) {
     store.set("mpvUosc", Boolean(enabled));
-    console.log(`🔄 [mpv] uosc ${enabled ? "enabled" : "disabled"} (applies to next launch)`);
+    console.log(
+      `🔄 [mpv] uosc ${enabled ? "enabled" : "disabled"} (applies to next launch)`,
+    );
     return this.getUoscInfo();
   },
 
@@ -371,15 +445,47 @@ const manager = {
   },
 
   maybeSendTime(force = false) {
-    if (!this.hash) return;
+    // Resolve the hash for the current episode: prefer the live hash we keep
+    // on this.index, then the item's own timeline.
+    let hash = this.hash;
+    const currentItem = this.playlist[this.index];
+    if (!hash && currentItem && typeof currentItem === "object") {
+      hash =
+        currentItem.hash ||
+        (currentItem.timeline && currentItem.timeline.hash) ||
+        null;
+    }
+    if (!hash) return;
+    const duration = Number(this.duration) || 0;
+    const time = Number(this.time) || 0;
+    // While a file is loading, mpv reports time-pos=0 (or the stale value
+    // of the previous episode). Reporting that would wipe the new episode's
+    // saved position in Lampa, so skip until playback actually advances.
+    // Note: duration is deliberately NOT gated here — HLS streams may not
+    // expose duration until segments load, and gating on it would silence
+    // reporting for the whole episode (the bug this replaces).
+    if (!force && time <= 0) return;
+    // A resume seek is pending for this episode: while it has not landed,
+    // playback may still sit near 0. Forwarding that would overwrite the
+    // saved position in Lampa before mpv actually lands on the resume point.
+    // Bound it with a wall-clock timeout so a seek that mpv silently drops
+    // (unseekable HLS) cannot silence reporting forever.
+    if (!force && this.resumeTarget > 0) {
+      if (Date.now() - this.lastResumeSeekAt > 8000) {
+        console.log("⚠️ [mpv] resume seek timed out — clearing");
+        this.resumeTarget = 0;
+      } else {
+        return;
+      }
+    }
     const now = Date.now();
     if (!force && now - this.lastSentAt < TIME_THROTTLE_MS) return;
     this.lastSentAt = now;
-    const duration = Number(this.duration) || 0;
-    const time = Number(this.time) || 0;
     const percent = duration > 0 ? (time / duration) * 100 : 0;
+    console.log(
+      `🔄 [mpv] send-time idx=${this.index} hash=${hash} time=${Math.round(time)} dur=${Math.round(duration)} force=${force}`,
+    );
     // Keep the stored item position fresh so playAt can resume correctly
-    const currentItem = this.playlist[this.index];
     if (currentItem && typeof currentItem === "object") {
       if (!currentItem.timeline || typeof currentItem.timeline !== "object") {
         currentItem.timeline = {};
@@ -389,7 +495,7 @@ const manager = {
       currentItem.timeline.percent = percent;
     }
     sendToWindow("mpv-time", {
-      hash: this.hash,
+      hash,
       time,
       duration,
       percent,
@@ -405,36 +511,113 @@ const manager = {
     return Number.isFinite(t) && t > 10 ? t : 0;
   },
 
-  consumePendingSeek() {
-    if (this.pendingSeek == null) return;
-    const target = Number(this.pendingSeek);
-    this.pendingSeek = null;
-    if (!Number.isFinite(target) || target <= 10) return;
-    // Only seek forward to the saved position, never rewind a fresh file
-    // that already plays past it
-    if (Number(this.time) >= target - 3) return;
-    if (this.sendCommand(["set_property", "time-pos", target])) {
-      this.time = target;
-      console.log(`🔄 [mpv] resume from saved position ${target}s`);
+  // Apply the armed resume seek once the demuxer is ready. Retries are
+  // bounded and rate-limited: mpv can report time-pos=0 before the first
+  // frame, and a seek sent too early is silently dropped. We re-send while
+  // the reported position is still far below the target and attempts remain.
+  consumeResumeSeek() {
+    if (this.resumeTarget <= 0 || this.resumeAttempts >= 30) {
+      this.resumeTarget = 0;
+      return;
     }
+    const target = this.resumeTarget;
+    const now = Date.now();
+    if (now - this.lastResumeSeekAt < 300) return;
+    this.lastResumeSeekAt = now;
+    // If playback already sits at/after the target this file is fresh
+    // (or the previous seek landed) — nothing more to do.
+    if (this.time >= target - 3) {
+      this.resumeTarget = 0;
+      return;
+    }
+    this.resumeAttempts += 1;
+    // Use the `seek` command (not set_property time-pos): mpv queues it and
+    // executes once the newly-loaded file can actually seek, so the resume
+    // is never dropped just because the demuxer is still starting.
+    if (this.sendCommand(["seek", target, "absolute"])) {
+      this.time = target;
+      console.log(`🔄 [mpv] resume seek #${this.resumeAttempts}: → ${target}s`);
+    }
+  },
+
+  // Parse mpv stdout --term-status-msg lines (LAMPA_TIME:t|d|p|). This is a
+  // second, socket-independent timecode channel — the same trick the
+  // reference dev/mpv.js uses — so progress keeps flowing even if the IPC
+  // socket stalls or drops events on a track switch.
+  handleStdout(line) {
+    if (!line || line.indexOf("LAMPA_TIME:") === -1) return;
+    const m = /LAMPA_TIME:([0-9.]+)\|([0-9.]+)\|(-?[0-9]+)\|/.exec(line);
+    if (!m) return;
+    const t = parseFloat(m[1]);
+    const d = parseFloat(m[2]);
+    const p = parseInt(m[3], 10);
+    if (!Number.isFinite(t) || t < 0) return;
+    if (Number.isFinite(p) && p >= 0 && p !== this.internalPos) {
+      this.internalPos = p;
+      this.syncIndexFromInternalPos();
+    }
+    this.time = t;
+    if (Number.isFinite(d) && d > 0) this.duration = d;
+    if (this.resumeTarget > 0) this.consumeResumeSeek();
+    this.maybeSendTime(false);
   },
 
   handleMessage(msg) {
     if (!msg || typeof msg !== "object") return;
+    // Replies to our get_property polling (request_id 101..103). This is a
+    // fallback for when observe_property events are missed — mpv answers
+    // these even across a track change, which keeps timecodes flowing.
+    if (
+      msg.request_id === 101 ||
+      msg.request_id === 102 ||
+      msg.request_id === 103
+    ) {
+      const v = msg.data;
+      if (msg.request_id === 101 && typeof v === "number") {
+        if (v !== this.internalPos) {
+          this.internalPos = v;
+          this.syncIndexFromInternalPos();
+        }
+      } else if (msg.request_id === 102 && typeof v === "number") {
+        this.time = v;
+        if (this.resumeTarget > 0) this.consumeResumeSeek();
+        this.maybeSendTime(false);
+      } else if (msg.request_id === 103 && typeof v === "number") {
+        const prev = this.duration;
+        this.duration = v;
+        if (prev <= 0 && v > 0) {
+          console.log(
+            `🔄 [mpv] duration loaded idx=${this.index} dur=${Math.round(v)}`,
+          );
+        }
+        if (this.resumeTarget > 0) this.consumeResumeSeek();
+        this.maybeSendTime(false);
+      }
+      return;
+    }
     // Property events
     if (msg.event === "property-change") {
       switch (msg.name) {
         case "time-pos":
           if (typeof msg.data === "number") {
             this.time = msg.data;
-            this.consumePendingSeek();
+            // New file ticks arrive after file-loaded; keep retrying resume
+            // until the demuxer accepts the seek.
+            if (this.resumeTarget > 0) this.consumeResumeSeek();
             this.maybeSendTime(false);
           }
           break;
         case "duration":
           if (typeof msg.data === "number") {
+            const prev = this.duration;
             this.duration = msg.data;
-            this.consumePendingSeek();
+            if (prev <= 0 && msg.data > 0) {
+              console.log(
+                `🔄 [mpv] duration loaded idx=${this.index} dur=${Math.round(msg.data)}`,
+              );
+            }
+            if (this.resumeTarget > 0) this.consumeResumeSeek();
+            this.maybeSendTime(false);
           }
           break;
         case "pause":
@@ -445,8 +628,9 @@ const manager = {
           if (msg.data === true) this.handleEof();
           break;
         case "playlist-pos":
-          // Internal mpv playlist cursor — track it so auto-advance
-          // and manual next/prev inside mpv stay in sync
+          // mpv advances its internal queue on its own (auto-next, OSD
+          // next/prev, uosc playlist pick). The m3u is in our original
+          // order, so mpv position == our playlist index directly.
           if (typeof msg.data === "number") {
             this.internalPos = msg.data;
             this.syncIndexFromInternalPos();
@@ -457,9 +641,28 @@ const manager = {
       }
       return;
     }
+    // A new file has started loading. Resume (if any) was applied by
+    // --input-commands=seek for the launch file; if mpv dropped it, retry
+    // here once the demuxer is actually ready.
+    if (msg.event === "start-file") {
+      console.log(
+        `🔄 [mpv] start-file idx=${this.index} playlistPos=${this.internalPos}`,
+      );
+      this.time = 0;
+      this.duration = 0;
+      return;
+    }
+    if (msg.event === "file-loaded") {
+      console.log(
+        `🔄 [mpv] file-loaded idx=${this.index} playlistPos=${this.internalPos}`,
+      );
+      this.consumeResumeSeek();
+      return;
+    }
     // End of file
     if (msg.event === "end-file") {
       const reason = msg.reason || "unknown";
+      console.log(`🔄 [mpv] end-file idx=${this.index} reason=${reason}`);
       if (reason === "eof") {
         this.handleEof();
       } else if (reason === "quit" || reason === "stop") {
@@ -468,69 +671,115 @@ const manager = {
     }
   },
 
+  // mpv moved to another playlist entry on its own (auto-next / OSD
+  // next/prev / uosc playlist pick). The m3u is in the ORIGINAL order, so
+  // mpv position == our playlist index directly. Sync our index/hash so
+  // timecodes are reported under the right episode, and arm resume only if
+  // that episode has a saved position (auto-advance to an unwatched episode
+  // starts at 0).
   syncIndexFromInternalPos() {
-    // mpv advances its internal queue on its own (auto-next, OSD next/prev).
-    // Map the internal position back to our playlist index via the base offset.
-    const mapped = this.internalPos - this.base;
-    if (!Number.isInteger(mapped)) return;
-    if (mapped < 0 || mapped >= this.playlist.length) return;
-    if (mapped === this.index) return;
-    // Flush the old episode before switching the cursor
-    this.maybeSendTime(true);
-    this.index = mapped;
+    if (!Number.isInteger(this.internalPos)) return;
+    // mpv went idle: playlist fully played (or emptied). If we had a
+    // session going, report the end and let the renderer close the player.
+    if (this.internalPos < 0) {
+      if (this.index >= 0 && this.playlist.length > 0 && this.proc) {
+        console.log("✅ [mpv] playlist finished (idle) — closing player");
+        if (this.resumeTarget <= 0) this.maybeSendTime(true);
+        sendToWindow("mpv-ended", {
+          reason: "eof",
+          autoNext: false,
+          index: this.index,
+          hash: this.hash,
+        });
+        this.sendCommand(["quit"]);
+      }
+      return;
+    }
+    if (this.internalPos >= this.playlist.length) return;
+    if (this.internalPos === this.index) return;
+    // Flush the finished/abandoned episode before switching the cursor —
+    // but only if it actually played (mpv also hops over entries that fail
+    // to load, and flushing time=0 for those would wipe their saved state
+    // in Lampa).
+    if (
+      this.resumeTarget <= 0 &&
+      (Number(this.time) > 5 || Number(this.duration) > 0)
+    ) {
+      this.maybeSendTime(true);
+    }
+    this.index = this.internalPos;
     const item = this.playlist[this.index];
     this.hash = (item && (item.hash || item?.timeline?.hash)) || this.hash;
     this.time = 0;
     this.duration = 0;
     this.paused = false;
     this.lastSentAt = 0;
-    this.pendingSeek = this.savedStartOf(item);
-    console.log(`🔄 [mpv] internal playlist moved to index=${this.index}`);
+    // Do NOT force media-title here: mpv picks the next entry's #EXTINF
+    // title itself once it loads, and a force set too early would freeze
+    // the OSD header on a stale label.
+    const label = item ? mpvDisplayTitle(item) : "";
+    console.log(`🔄 [mpv] playlist moved to index=${this.index}`);
+    sendToWindow("mpv-track", {
+      index: this.index,
+      hash: this.hash,
+      title: label || "",
+    });
+    // Arm resume for the newly-active episode; seek is retried on
+    // file-loaded/duration/time-pos.
+    const resume = this.savedStartOf(item);
+    this.resumeTarget = resume > 10 ? resume : 0;
+    this.resumeAttempts = 0;
+    this.lastResumeSeekAt = Date.now();
+    if (this.resumeTarget > 0) this.consumeResumeSeek();
   },
 
+  // Episode ended. Report the finished position (as watched). mpv advances
+  // through the playlist on its own (keep-open=yes still auto-advances
+  // between files); our cursor is synced by the playlist-pos event that
+  // follows. Only when the LAST playlist entry ended do we quit mpv.
   handleEof() {
-    // mpv fires end-file twice for the same file (eof-reached + end-file event).
-    // Guard against double-advance.
+    // mpv fires eof twice (eof-reached + end-file) — guard.
     const now = Date.now();
     if (this.eofGuardIndex === this.index && now - this.eofGuardAt < 3000) {
       return;
     }
     this.eofGuardIndex = this.index;
     this.eofGuardAt = now;
-    // Final flush of the current position
-    this.maybeSendTime(true);
-    const hasNext = this.index < this.playlist.length - 1;
-    if (hasNext) {
-      this.index += 1;
-      const next = this.playlist[this.index];
-      this.hash = (next && (next.hash || next?.timeline?.hash)) || this.hash;
-      // New file starts from zero — reset counters so the first ticks
-      // of the next episode are reported immediately
-      this.time = 0;
-      this.duration = 0;
-      this.paused = false;
-      this.lastSentAt = 0;
-      this.pendingSeek = this.savedStartOf(next);
-      console.log(`🔄 [mpv] auto-advance to next item (index=${this.index})`);
-      sendToWindow("mpv-ended", {
-        reason: "eof",
-        autoNext: true,
-        index: this.index,
-        hash: this.hash,
-      });
-    } else {
-      console.log("✅ [mpv] playback finished (eof)");
-      sendToWindow("mpv-ended", {
-        reason: "eof",
-        autoNext: false,
-        index: this.index,
-        hash: this.hash,
-      });
+    // Final flush of the completed episode. A finished episode counts as
+    // watched: report ~95% of duration so Lampa marks it as viewed.
+    if (this.resumeTarget <= 0) {
+      const duration = Number(this.duration) || 0;
+      if (duration > 0) {
+        this.time = duration * 0.95;
+        this.maybeSendTime(true);
+      } else {
+        this.maybeSendTime(true);
+      }
+    }
+    // mpv owns the queue; "is there a next entry" is about the raw mpv
+    // position (== our index, m3u is in original order).
+    const hasNext =
+      this.playlist.length > 0 && this.internalPos + 1 < this.playlist.length;
+    sendToWindow("mpv-ended", {
+      reason: "eof",
+      autoNext: hasNext,
+      index: this.index,
+      hash: this.hash,
+    });
+    // Only when the REAL last playlist entry finished do we close mpv.
+    // keep-open=yes parks it on the last frame otherwise, and mpv
+    // auto-advances between entries on its own — quitting early (e.g. when
+    // internalPos lags behind a fresh track switch) is what used to kill a
+    // session right after moving to the next episode.
+    if (!hasNext) {
+      console.log("✅ [mpv] last episode finished — closing player");
+      this.sendCommand(["quit"]);
     }
   },
 
   handleQuit(reason) {
-    this.maybeSendTime(true);
+    console.log(`🔄 [mpv] handleQuit reason=${reason || "quit"}`);
+    if (this.resumeTarget <= 0) this.maybeSendTime(true);
     sendToWindow("mpv-ended", {
       reason: reason || "quit",
       autoNext: false,
@@ -541,6 +790,7 @@ const manager = {
   },
 
   cleanupProc(removeSocket = true) {
+    this.stopPolling();
     if (this.sock) {
       try {
         this.sock.destroy();
@@ -556,6 +806,17 @@ const manager = {
     if (this.uoscDir) {
       cleanupUoscDir(this.uoscDir);
       this.uoscDir = null;
+    }
+    if (this.playlistFile) {
+      try {
+        if (existsSync(this.playlistFile)) unlinkSync(this.playlistFile);
+      } catch (err) {
+        console.error(
+          `❌ [mpv] failed to remove playlist ${this.playlistFile}:`,
+          err.message,
+        );
+      }
+      this.playlistFile = null;
     }
     this.uoscActive = false;
     this.proc = null;
@@ -643,27 +904,82 @@ const manager = {
     this.sock.on("close", () => {
       this.sock = null;
     });
+    // ESC за замовчуванням лише виходить з fullscreen — перепризначаємо
+    // на повний вихід, щоб клієнт завжди отримував mpv-ended
+    if (store.get("mpvEscQuits", true)) {
+      this.sendCommand(["keybind", "ESC", "quit"]);
+    }
     // Subscribe to properties
-    const props = ["time-pos", "duration", "pause", "eof-reached", "playlist-pos"];
+    const props = [
+      "time-pos",
+      "duration",
+      "pause",
+      "eof-reached",
+      "playlist-pos",
+    ];
     props.forEach((name, i) => {
       this.sendCommand(["observe_property", i + 1, name]);
     });
+    // Fallback polling (see POLL_MS): guarantees timecodes and track
+    // position keep flowing even if observe_property events are missed.
+    this.stopPolling();
+    this.pollTimer = setInterval(() => {
+      if (!this.sock || this.sock.destroyed) return;
+      try {
+        this.sock.write(
+          JSON.stringify({
+            command: ["get_property", "playlist-pos"],
+            request_id: 101,
+          }) + "\n",
+        );
+        this.sock.write(
+          JSON.stringify({
+            command: ["get_property", "time-pos"],
+            request_id: 102,
+          }) + "\n",
+        );
+        this.sock.write(
+          JSON.stringify({
+            command: ["get_property", "duration"],
+            request_id: 103,
+          }) + "\n",
+        );
+      } catch {
+        // Socket went away mid-write — stop polling.
+        this.stopPolling();
+      }
+    }, POLL_MS);
+    if (this.pollTimer.unref) this.pollTimer.unref();
   },
 
-  async play({ url, title, start, hash, playlist, index } = {}) {
+  stopPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  },
+
+  // title param is accepted (renderer sends it) but unused: mpv takes each
+  // entry's #EXTINF name for the OSD/window title, and a static --title
+  // would freeze the header on the show name across episode switches.
+  async play({ url, start, hash, playlist, index } = {}) {
     if (!isHttpUrl(url)) {
       throw new Error(`Invalid URL (http(s):// required): ${url}`);
     }
     const mpvPath = this.resolvePath();
     if (!mpvPath) {
-      throw new Error("mpv not found. Install via brew install mpv or set the path manually");
+      throw new Error(
+        "mpv not found. Install via brew install mpv or set the path manually",
+      );
     }
 
     await this.killPrevious();
     cleanupStaleSockets();
 
     const startSec = Number(start) || 0;
-    const list = Array.isArray(playlist) ? playlist.filter((it) => it && isHttpUrl(it.url)) : [];
+    const list = Array.isArray(playlist)
+      ? playlist.filter((it) => it && isHttpUrl(it.url))
+      : [];
     let idx = Number.isInteger(index) ? index : 0;
     if (idx < 0) idx = 0;
     if (list.length > 0 && idx >= list.length) idx = 0;
@@ -691,56 +1007,144 @@ const manager = {
       }
     }
 
-    const args = ["--no-terminal", "--force-window", "--keep-open=no"];
+    const args = [
+      // Terminal output is captured by us (see stdout fallback below), so
+      // --terminal=yes (not --no-terminal) is required for --term-status-msg
+      // to print. mpv writes plain text to our pipe — no console window.
+      "--terminal=yes",
+      "--force-window",
+      // mpv owns the playlist: next/prev are native mpv/OSD features and
+      // there is no separate playlist UI here. keep-open=yes lets mpv
+      // advance through the playlist on its own, but it NEVER exits on its
+      // own (not even after the last episode or a stream that fails to
+      // start) — we decide when to quit, so a hiccup on one episode cannot
+      // silently kill the whole session.
+      "--keep-open=yes",
+      "--keep-open-pause=no",
+      "--idle=yes",
+    ];
     if (store.get("mpvFullscreen", true)) {
       args.push("--fullscreen");
     }
     if (uoscDir) {
       args.push(`--config-dir=${uoscDir}`);
     }
-    if (startSec > 0) args.push(`--start=${startSec}`);
     args.push(`--input-ipc-server=${sockPath}`, "--osd-level=1");
-    if (title) args.push(`--title=${title}`);
-    // Load the whole playlist at once so mpv owns next/prev/eof order.
-    // The current episode goes first; base maps mpv positions back to ours.
-    const ordered =
-      list.length > 0
-        ? [list[idx], ...list.slice(0, idx), ...list.slice(idx + 1)]
-        : [];
-    for (const item of ordered) {
-      args.push(item.url);
-    }
-    if (ordered.length === 0) args.push(url);
+    // Fallback timecode channel (like dev/mpv.js): mpv prints a status line
+    // with time/duration/playlist-pos on every tick. We parse it as a
+    // backup so timecodes keep flowing even if the IPC socket ever stalls.
+    args.push(
+      "--term-status-msg=LAMPA_TIME:${=time-pos:0}|${=duration:0}|${playlist-pos:0}|",
+    );
+    // NOTE: no --title here. A static --title would override media-title for
+    // the WHOLE session, freezing the OSD header on the show name while
+    // episodes change. Without it, mpv takes each entry's #EXTINF title
+    // (SxxExx etc.) and updates it on track switch — which is what uosc and
+    // the window title show.
 
-    console.log(`🔄 [mpv] launch: ${mpvPath} ${args.join(" ")}`);
-    const proc = spawn(mpvPath, args, { stdio: "ignore" });
+    // Launch resume position: the saved time of the episode that is current
+    // at launch (list[idx]); the separately-passed `start` is the fallback.
+    let launchStart = 0;
+    if (list.length > 0) {
+      const launchItem = list[Math.min(idx, list.length - 1)];
+      const itemStart = this.savedStartOf(launchItem);
+      if (itemStart > 10) launchStart = itemStart;
+    }
+    if (!(launchStart > 10)) launchStart = startSec > 10 ? startSec : 0;
+
+    // Whole serial as one m3u -> mpv has a real playlist (next/prev in OSD,
+    // uosc playlist button). The m3u is in the ORIGINAL order and mpv starts
+    // on the launch episode via --playlist-start (verified working with
+    // keep-open=yes): mpv playlist position == our index, so titles and
+    // timecodes stay in sync.
+    let playlistFile = null;
+    if (list.length > 0) {
+      socketCounter += 1;
+      const candidate = path.join(
+        os.tmpdir(),
+        `lampa-mpv-${process.pid}-${socketCounter}.m3u`,
+      );
+      try {
+        // Original order — mpv playlist position == our index. No rotation,
+        // no base offset: this is what keeps titles/timecodes in sync.
+        writeM3uPlaylist(candidate, list);
+        playlistFile = candidate;
+      } catch (err) {
+        console.error("❌ [mpv] failed to write playlist file:", err.message);
+        playlistFile = null;
+      }
+    }
+    if (playlistFile) {
+      args.push(`--playlist=${playlistFile}`);
+      this.playlistFile = playlistFile;
+      // Start from the launch episode. Works reliably with keep-open=yes:
+      // mpv loads that entry, plays it, then advances through the rest.
+      args.push(`--playlist-start=${idx}`);
+    } else {
+      this.playlistFile = null;
+      args.push(url);
+    }
+    if (launchStart > 0) {
+      // Resume of the launch episode only — runs once after its file loads,
+      // does NOT leak onto the other entries (verified against mpv 0.41).
+      args.push(`--input-commands=seek ${launchStart} absolute`);
+      this.resumeTarget = launchStart;
+      this.resumeAttempts = 0;
+      this.lastResumeSeekAt = Date.now();
+    }
+
+    console.log(
+      `🔄 [mpv] launch (playlist=${list.length} idx=${idx} start=${launchStart}): ${mpvPath} ${args.join(" ")}`,
+    );
+    // --term-status-msg needs stdout, so we capture it and parse the
+    // LAMPA_TIME lines as a fallback timecode source (see handleStdout).
+    const proc = spawn(mpvPath, args, { stdio: ["ignore", "pipe", "ignore"] });
+    let stdoutBuf = "";
+    if (proc.stdout) {
+      proc.stdout.setEncoding("utf8");
+      proc.stdout.on("data", (chunk) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/[\r\n]+/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) {
+          this.handleStdout(line);
+        }
+      });
+    }
     this.proc = proc;
     this.sockPath = sockPath;
     this.playlist = list;
     this.index = list.length > 0 ? idx : 0;
-    this.base = list.length > 0 ? idx : 0;
-    this.internalPos = 0;
-    this.pendingSeek = null;
-    this.eofGuardAt = 0;
-    this.eofGuardIndex = -1;
     this.hash = hash || null;
-    this.time = startSec;
+    this.time = launchStart || 0;
     this.duration = 0;
     this.paused = false;
     this.lastSentAt = 0;
+    this.eofGuardAt = 0;
+    this.eofGuardIndex = -1;
     this.uoscDir = uoscDir;
     this.uoscActive = uoscActive;
 
     proc.on("error", (err) => {
       console.error("❌ [mpv] process launch failed:", err.message);
-      sendToWindow("mpv-ended", { reason: "error", index: this.index, hash: this.hash });
+      sendToWindow("mpv-ended", {
+        reason: "error",
+        index: this.index,
+        hash: this.hash,
+      });
       this.cleanupProc(true);
       this.proc = null;
     });
-    proc.on("exit", (code) => {
-      console.log(`🔄 [mpv] process exited (code=${code})`);
+    proc.on("exit", (code, signal) => {
+      console.log(
+        `🔄 [mpv] process exited (code=${code} signal=${signal || "none"})`,
+      );
       // Final event if not sent via quit/eof yet
-      sendToWindow("mpv-ended", { reason: "quit", index: this.index, hash: this.hash });
+      sendToWindow("mpv-ended", {
+        reason: "quit",
+        index: this.index,
+        hash: this.hash,
+      });
       this.cleanupProc(true);
       this.proc = null;
     });
@@ -749,12 +1153,10 @@ const manager = {
       const sock = await this.connectSocket(sockPath);
       this.attachSocket(sock);
       console.log(`✅ [mpv] IPC connected: ${sockPath}`);
-      // Playlist is already on the command line — nothing to append.
-      // Re-apply the saved position in case --start was ignored.
-      if (startSec > 10) {
-        this.pendingSeek = startSec;
-        this.consumePendingSeek();
-      }
+      // mpv starts on the launch entry via --playlist-start. If
+      // --input-commands=seek was dropped (file not seekable yet), keep
+      // retrying via IPC after file-loaded.
+      this.consumeResumeSeek();
     } catch (err) {
       console.error("❌ [mpv] failed to connect to IPC socket:", err.message);
       // Video plays without IPC — keep the process, but no timecodes
@@ -763,29 +1165,21 @@ const manager = {
     return { success: true, path: mpvPath };
   },
 
+  // Store the playlist. mpv owns the queue from the m3u passed at launch,
+  // so a late setPlaylist() only refreshes our copy for index mapping.
   setPlaylist(list) {
     if (!Array.isArray(list)) throw new Error("playlist must be an array");
     const clean = list.filter((it) => it && isHttpUrl(it.url));
     this.playlist = clean;
     if (this.index >= clean.length) this.index = 0;
-    // Base mapping is only valid for the launch playlist; a late set()
-    // cannot reorder the running mpv queue, so reset the mapping.
-    this.base = this.index;
-    this.internalPos = 0;
-    // If mpv is already playing — append only items not yet in the queue
-    if (this.proc && this.sock) {
-      for (const item of clean) {
-        this.sendCommand(["loadfile", item.url, "append"]);
-      }
-      this.base = 0;
-    }
     console.log(`✅ [mpv] playlist stored (${clean.length} items)`);
     return { success: true, length: clean.length };
   },
 
-  // Navigation via the internal mpv playlist when possible:
-  // our index -> mpv position = index - base (mod length).
-  // Falls back to loadfile (replace) if IPC is down.
+  // Navigation: ask mpv to move its playlist cursor to `index`. mpv loads
+  // that episode, emits playlist-pos, and syncIndexFromInternalPos keeps our
+  // index/hash/resume in step. Used from the renderer (Lampa UI next/prev/
+  // episode pick) — the mpv-native playlist/OSD stays authoritative.
   playAt(index) {
     const idx = Number(index);
     if (!Number.isInteger(idx) || idx < 0 || idx >= this.playlist.length) {
@@ -795,24 +1189,28 @@ const manager = {
     if (!item || !isHttpUrl(item.url)) {
       throw new Error(`No valid URL for index=${idx}`);
     }
-    // Flush the old position before switching
-    this.maybeSendTime(true);
-    this.index = idx;
-    this.hash = item.hash || item?.timeline?.hash || this.hash;
-    this.time = 0;
-    this.duration = 0;
-    this.paused = false;
-    this.lastSentAt = 0;
-    this.pendingSeek = this.savedStartOf(item);
+    if (idx !== this.index && this.resumeTarget <= 0) {
+      // Flush the old position before switching.
+      this.maybeSendTime(true);
+    }
     if (this.sock && !this.sock.destroyed) {
-      const n = this.playlist.length;
-      const pos = ((idx - this.base) % n + n) % n;
-      this.sendCommand(["set_property", "playlist-pos", pos]);
-      console.log(`🔄 [mpv] playAt index=${idx} (mpv pos=${pos})`);
+      // m3u is in the original order, so mpv position == our index.
+      this.sendCommand(["set_property", "playlist-pos", idx]);
+      console.log(`🔄 [mpv] playAt index=${idx}`);
     } else {
       console.error("⚠️ [mpv] playAt without active IPC — cursor only updated");
     }
     return { success: true, index: idx };
+  },
+
+  // Switch to the episode whose url matches, without restarting the process.
+  // Used by the renderer when Lampa re-plays an episode of the serial that
+  // mpv is already playing.
+  playUrl(url) {
+    if (!isHttpUrl(url)) throw new Error(`Invalid URL: ${url}`);
+    const idx = this.playlist.findIndex((it) => it && it.url === url);
+    if (idx < 0) throw new Error(`URL not in the active playlist: ${url}`);
+    return this.playAt(idx);
   },
 
   seek(sec) {
@@ -823,6 +1221,8 @@ const manager = {
     if (!this.sendCommand(["set_property", "time-pos", value])) {
       throw new Error("mpv is not running (no IPC connection)");
     }
+    // A manual seek overrides any pending resume.
+    this.resumeTarget = 0;
     this.time = value;
     this.maybeSendTime(true);
     return { success: true, time: value };
@@ -833,7 +1233,7 @@ const manager = {
       this.cleanupProc(true);
       return { success: true };
     }
-    this.maybeSendTime(true);
+    if (this.resumeTarget <= 0) this.maybeSendTime(true);
     await this.killPrevious();
     console.log("✅ [mpv] stopped");
     return { success: true };

@@ -30,6 +30,7 @@ const store = new Store({
     mpvPath: "",
     mpvUosc: true,
     mpvFullscreen: true,
+    mpvEscQuits: true,
   },
 });
 

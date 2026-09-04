@@ -31,6 +31,15 @@ function registerMpvHandlers(getMainWindow) {
     }
   });
 
+  ipcMain.handle("mpv-play-url", async (event, url) => {
+    try {
+      return mpvManager.playUrl(url);
+    } catch (err) {
+      console.error("❌ [mpv] mpv-play-url:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle("mpv-seek", async (event, sec) => {
     try {
       return mpvManager.seek(sec);
@@ -101,7 +110,10 @@ function registerMpvHandlers(getMainWindow) {
   ipcMain.handle("mpv-get-fullscreen", async () => {
     try {
       const store = require("../storeManager");
-      return { success: true, enabled: Boolean(store.get("mpvFullscreen", true)) };
+      return {
+        success: true,
+        enabled: Boolean(store.get("mpvFullscreen", true)),
+      };
     } catch (err) {
       console.error("❌ [mpv] mpv-get-fullscreen:", err.message);
       return { success: false, error: err.message };
@@ -112,10 +124,39 @@ function registerMpvHandlers(getMainWindow) {
     try {
       const store = require("../storeManager");
       store.set("mpvFullscreen", Boolean(enabled));
-      console.log(`🔄 [mpv] fullscreen ${enabled ? "enabled" : "disabled"} (applies to next launch)`);
+      console.log(
+        `🔄 [mpv] fullscreen ${enabled ? "enabled" : "disabled"} (applies to next launch)`,
+      );
       return { success: true, enabled: Boolean(enabled) };
     } catch (err) {
       console.error("❌ [mpv] mpv-set-fullscreen:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-get-esc-quits", async () => {
+    try {
+      const store = require("../storeManager");
+      return {
+        success: true,
+        enabled: Boolean(store.get("mpvEscQuits", true)),
+      };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-get-esc-quits:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-set-esc-quits", async (event, enabled) => {
+    try {
+      const store = require("../storeManager");
+      store.set("mpvEscQuits", Boolean(enabled));
+      console.log(
+        `🔄 [mpv] ESC quits ${enabled ? "enabled" : "disabled"} (applies to next launch)`,
+      );
+      return { success: true, enabled: Boolean(enabled) };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-set-esc-quits:", err.message);
       return { success: false, error: err.message };
     }
   });
@@ -127,7 +168,11 @@ function registerMpvHandlers(getMainWindow) {
         title: "Select the mpv executable",
         properties: ["openFile"],
       });
-      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      if (
+        result.canceled ||
+        !result.filePaths ||
+        result.filePaths.length === 0
+      ) {
         return { success: false, canceled: true };
       }
       const selected = result.filePaths[0];

@@ -163,6 +163,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     play: (params) => ipcRenderer.invoke("mpv-play", params),
     setPlaylist: (list) => ipcRenderer.invoke("mpv-playlist", list),
     playAt: (index) => ipcRenderer.invoke("mpv-play-at", index),
+    playUrl: (url) => ipcRenderer.invoke("mpv-play-url", url),
     seek: (sec) => ipcRenderer.invoke("mpv-seek", sec),
     stop: () => ipcRenderer.invoke("mpv-stop"),
     status: () => ipcRenderer.invoke("mpv-status"),
@@ -172,12 +173,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getUosc: () => ipcRenderer.invoke("mpv-get-uosc"),
     setUosc: (enabled) => ipcRenderer.invoke("mpv-set-uosc", enabled),
     getFullscreen: () => ipcRenderer.invoke("mpv-get-fullscreen"),
-    setFullscreen: (enabled) => ipcRenderer.invoke("mpv-set-fullscreen", enabled),
+    setFullscreen: (enabled) =>
+      ipcRenderer.invoke("mpv-set-fullscreen", enabled),
+    getEscQuits: () => ipcRenderer.invoke("mpv-get-esc-quits"),
+    setEscQuits: (enabled) => ipcRenderer.invoke("mpv-set-esc-quits", enabled),
     onTime: (callback) => {
       const subscription = (event, data) => callback(data);
       ipcRenderer.on("mpv-time", subscription);
       return () => {
         ipcRenderer.removeListener("mpv-time", subscription);
+      };
+    },
+    onTrack: (callback) => {
+      const subscription = (event, data) => callback(data);
+      ipcRenderer.on("mpv-track", subscription);
+      return () => {
+        ipcRenderer.removeListener("mpv-track", subscription);
       };
     },
     onEnded: (callback) => {

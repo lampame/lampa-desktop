@@ -597,6 +597,16 @@
         en: "Launch mpv directly in fullscreen. Applies on next launch.",
         uk: "Запускати mpv одразу в повноекранному режимі. Застосовується при наступному запуску.",
       },
+      mpv_esc_quits_title: {
+        ru: "ESC закрывает mpv",
+        en: "ESC quits mpv",
+        uk: "ESC закриває mpv",
+      },
+      mpv_esc_quits_description: {
+        ru: "Переназначить ESC с выхода из полноэкранного режима на полное закрытие mpv. Применяется при следующем запуске.",
+        en: "Remap ESC from exiting fullscreen to quitting mpv entirely. Applies on next launch.",
+        uk: "Перепризначити ESC з виходу з повноекранного режиму на повне закриття mpv. Застосовується при наступному запуску.",
+      },
       app_settings_keyboard_section: {
         ru: "Выбор клавиатуры",
         en: "Keyboard selection",
@@ -904,6 +914,22 @@
     }
 
     if (Lampa.Platform.macOS()) {
+      // Sync mpvEscQuits from electron-store to Lampa.Storage so the toggle
+      // shows the correct persisted state (not always default: true).
+      (async function syncMpvEscQuits() {
+        try {
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (mpv && typeof mpv.getEscQuits === "function") {
+            var info = await mpv.getEscQuits();
+            if (info && typeof info.enabled === "boolean") {
+              Lampa.Storage.set("mpv_esc_quits", info.enabled);
+            }
+          }
+        } catch (err) {
+          console.error("APP Failed to sync mpv ESC quits:", err);
+        }
+      })();
+
       Lampa.SettingsApi.addParam({
         component: "app_settings",
         param: {
@@ -1019,7 +1045,9 @@
               if (info && !info.supported) {
                 element
                   .find(".settings-param__descr")
-                  .text("mpv " + (info.version || "?") + " < " + info.minVersion);
+                  .text(
+                    "mpv " + (info.version || "?") + " < " + info.minVersion,
+                  );
               }
             } catch (err) {
               console.error("APP Failed to get uosc info", err);
@@ -1045,6 +1073,30 @@
               await mpv.setFullscreen(value === "true");
             } catch (err) {
               console.error("APP Failed to set mpv fullscreen", err);
+            }
+          }
+        },
+      });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_esc_quits",
+          type: "trigger",
+          default: true,
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_esc_quits_title"),
+          description: Lampa.Lang.translate("mpv_esc_quits_description"),
+        },
+        onChange: async function (value) {
+          var enabled = value === "true";
+          Lampa.Storage.set("mpv_esc_quits", enabled);
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (mpv && typeof mpv.setEscQuits === "function") {
+            try {
+              await mpv.setEscQuits(enabled);
+            } catch (err) {
+              console.error("APP Failed to set mpv ESC quits", err);
             }
           }
         },
@@ -3220,8 +3272,7 @@
 
   function isLibmpvSelected() {
     try {
-      if (localStorage.getItem("player_desktop_mpv") === "libmpv")
-        return true;
+      if (localStorage.getItem("player_desktop_mpv") === "libmpv") return true;
     } catch {
       // ignore
     }
@@ -3265,8 +3316,10 @@
     var pendingPlay = null;
     var pendingList = null;
     var playTimer = null;
-    var handlersByHash = {};
-    var currentHash = null;
+    // urls of the serial currently handed to mpv. When Lampa calls
+    // Player.play again for one of them (episode pick / next / prev in the
+    // Lampa UI), we must NOT restart mpv — just switch the track.
+    var activePlaylistUrls = null;
 
     function cleanPlaylist(list) {
       if (!Array.isArray(list)) return [];
@@ -3316,9 +3369,181 @@
       }
     }
 
+    function pad2(n) {
+      n = Number(n);
+      if (!Number.isFinite(n) || n < 0) return "00";
+      return (n < 10 ? "0" : "") + Math.floor(n);
+    }
+
+    function isUrlLikeTitle(t) {
+      if (typeof t !== "string") return true;
+      var s = t.trim();
+      if (!s) return true;
+      if (/^https?:\/\//i.test(s)) return true;
+      if (/[?&=]{2,}/.test(s) && s.length > 80) return true;
+      return false;
+    }
+
+    // Human-readable episode title from Lampa client fields.
+    // torrent.js provides title ("5 / Назва серії"), fname (episode name),
+    // first_title (show name) and card (TMDB card); episode.js provides
+    // title = name || 'Серія N'. Falls back to "Show - SxxExx - name".
+    function buildDisplayTitle(item) {
+      if (!item || typeof item !== "object") return "";
+      var t = typeof item.title === "string" ? item.title.trim() : "";
+      if (t && !isUrlLikeTitle(t)) return t;
+      var fname = typeof item.fname === "string" ? item.fname.trim() : "";
+      var s = Number(item.season);
+      var e = Number(item.episode);
+      var hasSE = Number.isFinite(s) && s > 0 && Number.isFinite(e) && e > 0;
+      var card = item.card && typeof item.card === "object" ? item.card : null;
+      var base = "";
+      if (card) {
+        if (typeof card.title === "string" && card.title.trim())
+          base = card.title.trim();
+        else if (typeof card.name === "string" && card.name.trim())
+          base = card.name.trim();
+      }
+      if (
+        !base &&
+        typeof item.first_title === "string" &&
+        item.first_title.trim()
+      )
+        base = item.first_title.trim();
+      if (hasSE) {
+        var tag = "S" + pad2(s) + "E" + pad2(e);
+        var name = fname && !isUrlLikeTitle(fname) ? fname : "";
+        var head = base ? base + " - " + tag : tag;
+        return name ? head + " - " + name : head;
+      }
+      if (fname && !isUrlLikeTitle(fname)) return fname;
+      if (base) return base;
+      return "";
+    }
+
+    // Ensure a playlist item carries a usable timeline object (with hash and
+    // a live Lampa handler).
+    //
+    // If Lampa already put a timeline.hash on the item — TRUST IT and keep
+    // that exact hash: re-deriving it from season/episode/title here is how
+    // progress used to get written under a wrong key (Lampa hashes episodes
+    // differently depending on the module that opened them). We only make
+    // sure a live handler exists by taking Timeline.view(hash).
+    //
+    // Only when the item truly has no hash do we fall back to candidate
+    // hashes like Lampa computes them (mirroring dev/mpv.js).
+    function ensureItemTimeline(item, card) {
+      if (!item || typeof item !== "object") return;
+      var tl =
+        item.timeline && typeof item.timeline === "object"
+          ? item.timeline
+          : null;
+      // Already has both hash and a live handler — nothing to do.
+      if (tl && tl.hash != null && typeof tl.handler === "function") return;
+      if (
+        !window.Lampa ||
+        !Lampa.Timeline ||
+        typeof Lampa.Timeline.view !== "function"
+      )
+        return;
+
+      // Case 1: Lampa gave us a hash. Take a fresh view of THAT hash so we
+      // get a live handler, preserving any client-provided position.
+      if (tl && tl.hash != null) {
+        var fixed = Lampa.Timeline.view(String(tl.hash));
+        if (fixed) {
+          if (tl.time != null && Number(tl.time) > 0)
+            fixed.time = Number(tl.time);
+          if (tl.duration != null) fixed.duration = Number(tl.duration);
+          if (tl.percent != null) fixed.percent = Number(tl.percent);
+          fixed.hash = String(tl.hash);
+          item.timeline = fixed;
+        }
+        return;
+      }
+      if (!Lampa.Utils || typeof Lampa.Utils.hash !== "function") return;
+
+      var s = Number(item.season_number ?? item.s ?? item.season);
+      var e = Number(item.episode_number ?? item.e ?? item.episode ?? item.num);
+      var isSeries = Number.isFinite(s) && s > 0 && Number.isFinite(e) && e > 0;
+
+      // Collect every title variant Lampa may have hashed the item under.
+      var names = [];
+      var pushName = function (v) {
+        if (typeof v === "string" && v && names.indexOf(v) === -1)
+          names.push(v);
+      };
+      var cardObj =
+        card && typeof card === "object"
+          ? card
+          : item.card && typeof item.card === "object"
+            ? item.card
+            : item.movie && typeof item.movie === "object"
+              ? item.movie
+              : item;
+      if (cardObj && typeof cardObj === "object") {
+        pushName(cardObj.original_name);
+        pushName(cardObj.original_title);
+        pushName(cardObj.name);
+        pushName(cardObj.title);
+      }
+      pushName(item.original_name);
+      pushName(item.original_title);
+      pushName(item.first_title);
+      pushName(item.name);
+      pushName(item.title);
+      if (names.length === 0) names.push("media");
+
+      // Build candidate hashes and pick one that already stores progress.
+      var candidates = [];
+      var seen = {};
+      var add = function (h) {
+        if (h != null && !seen[h]) {
+          seen[h] = true;
+          candidates.push(h);
+        }
+      };
+      if (isSeries) {
+        names.forEach(function (n) {
+          add(Lampa.Utils.hash([s, s > 10 ? ":" : "", e, n].join("")));
+          add(Lampa.Utils.hash([s, e, n].join("")));
+        });
+      } else {
+        names.forEach(function (n) {
+          add(Lampa.Utils.hash(n));
+        });
+      }
+      if (candidates.length === 0) return;
+
+      var chosen = null;
+      for (var i = 0; i < candidates.length; i++) {
+        var cand = Lampa.Timeline.view(candidates[i]);
+        if (cand && (Number(cand.time) > 0 || Number(cand.percent) > 0)) {
+          chosen = cand;
+          chosen.hash = candidates[i];
+          break;
+        }
+      }
+      if (!chosen) {
+        chosen = Lampa.Timeline.view(candidates[0]);
+        if (!chosen) chosen = { time: 0, percent: 0, duration: 0 };
+        chosen.hash = candidates[0];
+      }
+      // Preserve any client-provided position fields.
+      if (tl) {
+        if (tl.time != null && Number(tl.time) > 0)
+          chosen.time = Number(tl.time);
+        if (tl.duration != null) chosen.duration = Number(tl.duration);
+        if (tl.percent != null) chosen.percent = Number(tl.percent);
+      }
+      item.timeline = chosen;
+    }
+
     function sanitizeItemForIpc(item) {
       var safe = {
-        title: typeof item.title === "string" ? item.title : "",
+        title:
+          buildDisplayTitle(item) ||
+          (typeof item.title === "string" ? item.title : ""),
         url: item.url,
       };
       if (item.season != null) safe.season = item.season;
@@ -3343,32 +3568,22 @@
       return safe;
     }
 
-    function rememberHandler(item) {
-      if (
-        item &&
-        item.timeline &&
-        item.timeline.hash != null &&
-        typeof item.timeline.handler === "function"
-      ) {
-        handlersByHash[String(item.timeline.hash)] = item.timeline.handler;
-        currentHash = String(item.timeline.hash);
-      }
-    }
-
-    function refreshHandlersFromPlaylist() {
-      try {
-        var live =
-          Lampa.PlayerPlaylist &&
-          typeof Lampa.PlayerPlaylist.get === "function"
-            ? Lampa.PlayerPlaylist.get()
-            : null;
-        if (Array.isArray(live)) live.forEach(rememberHandler);
-      } catch {
-        // ignore — handlers stay as-is
-      }
-    }
-
     function sendToMpv(data, list) {
+      console.log(
+        "[mpv-hook] sendToMpv url=",
+        data && data.url,
+        " list=",
+        Array.isArray(list) ? list.length : "n/a",
+        " titles=",
+        Array.isArray(list)
+          ? list
+              .slice(0, 3)
+              .map(function (i) {
+                return i && i.title;
+              })
+              .join(" | ")
+          : "",
+      );
       if (
         !data ||
         typeof data.url !== "string" ||
@@ -3382,15 +3597,62 @@
         return origPlay(data);
       }
       var cleaned = cleanPlaylist(list);
-      var start = Number((data.timeline && data.timeline.time) || 0) || 0;
-      var hash = data.timeline && data.timeline.hash;
-      rememberHandler(data);
-      cleaned.forEach(rememberHandler);
+
+      // Episode pick / next / prev from the Lampa UI ends here as ANOTHER
+      // Player.play call for an episode of the serial that mpv is already
+      // playing. Restarting mpv for that would kill the process and lose the
+      // playlist; instead switch the track in place.
+      var known =
+        typeof mpv.playUrl === "function" &&
+        !!activePlaylistUrls &&
+        activePlaylistUrls.indexOf(data.url) !== -1;
+      if (known) {
+        // Ensure the newly chosen episode still has a hash/handler before
+        // asking mpv to switch to it.
+        ensureItemTimeline(data, data.card || data.movie || data);
+        cleaned.forEach(function (item) {
+          ensureItemTimeline(item, data.card || data.movie || data);
+        });
+        if (cleaned.length) origPlaylist(cleaned);
+        if (typeof mpv.playUrl === "function") {
+          var req = mpv.playUrl(data.url);
+          if (req && typeof req.catch === "function") {
+            req.catch(function (err) {
+              console.error("APP mpv.playUrl(switch) failed", err);
+            });
+          }
+        }
+        sendExternal(data);
+        return;
+      }
+
+      var launchCard = data.card || data.movie || data;
+      // Make sure EVERY item knows its Lampa hash/handler, not just the
+      // launch episode — otherwise progress for later episodes (auto-next /
+      // mpv prev/next) cannot be written back.
+      ensureItemTimeline(data, launchCard);
+      cleaned.forEach(function (item) {
+        ensureItemTimeline(item, launchCard);
+      });
+      // start/hash must be read AFTER ensureItemTimeline: if Lampa did not
+      // attach a timeline to the launch item, ensureItemTimeline derives it
+      // from Timeline.view(hash) (which carries the saved position).
+      var tl =
+        data.timeline && typeof data.timeline === "object" ? data.timeline : {};
+      var start = Number(tl.time) || 0;
+      var hash = tl.hash || null;
       if (cleaned.length) origPlaylist(cleaned);
+      // Remember the serial we handed to mpv so a later Player.play for one
+      // of its episodes switches the track instead of restarting the process.
+      activePlaylistUrls = cleaned.map(function (it) {
+        return it.url;
+      });
       var ipcPlaylist = cleaned.map(sanitizeItemForIpc);
       var request = mpv.play({
         url: data.url,
-        title: typeof data.title === "string" ? data.title : "",
+        title:
+          buildDisplayTitle(data) ||
+          (typeof data.title === "string" ? data.title : ""),
         start: start,
         hash: hash,
         playlist: ipcPlaylist,
@@ -3462,22 +3724,42 @@
         if (typeof mpvApi.onTime === "function") {
           mpvApi.onTime(function (progress) {
             if (!progress) return;
-            var key =
-              progress.hash != null ? String(progress.hash) : currentHash;
-            var handler = key != null ? handlersByHash[key] : null;
-            if (typeof handler !== "function") {
-              // Handler for the new episode may arrive with the next
-              // Player.play/select call — refresh from the live playlist
-              refreshHandlersFromPlaylist();
-              handler = key != null ? handlersByHash[key] : null;
-            }
-            if (typeof handler === "function") {
-              handler(progress.percent, progress.time, progress.duration);
+            var hash = progress.hash;
+            if (hash == null) return;
+            // Deliver straight into Lampa's timeline, the same way the
+            // reference desktop client does (Timeline.update + timeCall):
+            // no handler registry, no index lookups — the main process has
+            // already resolved the hash of the episode that is playing.
+            var data = {
+              hash: String(hash),
+              time: Math.round(Number(progress.time) || 0),
+              duration: Math.round(Number(progress.duration) || 0),
+              percent: Math.round(Number(progress.percent) || 0),
+            };
+            try {
+              if (window.Lampa && Lampa.Timeline && Lampa.Timeline.update) {
+                Lampa.Timeline.update(data);
+              }
+              if (
+                window.Lampa &&
+                Lampa.Android &&
+                typeof Lampa.Android.timeCall === "function"
+              ) {
+                Lampa.Android.timeCall(data);
+              }
+            } catch (e) {
+              console.error("APP mpv time update failed", e);
             }
           });
         }
         if (typeof mpvApi.onEnded === "function") {
-          mpvApi.onEnded(function () {
+          mpvApi.onEnded(function (info) {
+            // autoNext=true means mpv already advanced to the next episode
+            // on its own — Lampa must NOT tear down the playlist here.
+            if (info && info.autoNext === true) return;
+            // Playback of the serial finished / mpv was closed. A fresh
+            // Player.play for the same title must restart mpv, not playAt.
+            activePlaylistUrls = null;
             if (Lampa.Player.listener) {
               Lampa.Player.listener.send("destroy", {});
             }
@@ -3486,45 +3768,6 @@
       }
     } catch (err) {
       console.error("APP Failed to subscribe to mpv events", err);
-    }
-
-    // Lampa UI -> mpv: episode pick and next/prev buttons send 'select' with position
-    try {
-      if (
-        Lampa.PlayerPlaylist &&
-        Lampa.PlayerPlaylist.listener &&
-        typeof Lampa.PlayerPlaylist.listener.follow === "function"
-      ) {
-        Lampa.PlayerPlaylist.listener.follow("select", function (event) {
-          if (!isLibmpvSelected()) return;
-          if (event && event.item && event.item.timeline) {
-            if (
-              event.item.timeline.hash != null &&
-              typeof event.item.timeline.handler === "function"
-            ) {
-              handlersByHash[String(event.item.timeline.hash)] =
-                event.item.timeline.handler;
-              currentHash = String(event.item.timeline.hash);
-            }
-          }
-          var mpv = window.electronAPI && window.electronAPI.mpv;
-          if (
-            mpv &&
-            typeof mpv.playAt === "function" &&
-            event &&
-            typeof event.position === "number"
-          ) {
-            var request = mpv.playAt(event.position);
-            if (request && typeof request.catch === "function") {
-              request.catch(function (err) {
-                console.error("APP mpv.playAt failed", err);
-              });
-            }
-          }
-        });
-      }
-    } catch (err) {
-      console.error("APP Failed to subscribe to playlist", err);
     }
   }
   initMpvHook.done = false;
