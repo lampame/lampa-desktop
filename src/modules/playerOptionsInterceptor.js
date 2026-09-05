@@ -1,5 +1,5 @@
 // modules/playerOptionsInterceptor.js
-const { protocol } = require("electron");
+const { protocol, net } = require("electron");
 
 class PlayerOptionsInterceptor {
   constructor() {
@@ -36,7 +36,12 @@ class PlayerOptionsInterceptor {
         });
       }
 
-      return fetch(request);
+      // net.fetch використовує нативний Chromium network stack (як у renderer),
+      // а не Node.js HTTP stack. Глобальний fetch() з main process давав
+      // ETIMEDOUT (IPv6) і вішав запити сторінки -> гальмування UI.
+      // bypassCustomProtocolHandlers: true дозволяє net.fetch обійти цей же
+      // protocol.handle і піти в мережу напряму.
+      return net.fetch(request, { bypassCustomProtocolHandlers: true });
     });
     this.isInitialized = true;
     console.log("✅ Перехват OPTIONS для VLC настроен через protocol.handle");
