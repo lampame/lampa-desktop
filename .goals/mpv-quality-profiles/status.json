@@ -1,0 +1,1 @@
+{"builder_model": "GPT:5.6-Luna", "created_at": "2026-09-06T00:00:00Z", "goal_id": "mpv-quality-profiles", "history": [{"feedback": "inspector-feedback-1.md", "iteration": 1, "verdict": "PASS"}], "initial_sha": "8ab212b6ff6f28e9a298b0265b2bdd381451e532", "inspector_model": "GPT:5.6-Sol", "iteration": 1, "status": "inspecting"}
