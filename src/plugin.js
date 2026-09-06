@@ -53,12 +53,14 @@
       this.queue.sort((a, b) => (a.order || 999) - (b.order || 999));
 
       this.queue.forEach((item) => {
-        Lampa.SettingsApi.addParam({
-          component: this.componentName,
+        var config = {
+          component: item.component || this.componentName,
           param: item.param,
           field: item.field,
           onChange: item.onChange,
-        });
+        };
+        if (item.onRender) config.onRender = item.onRender;
+        Lampa.SettingsApi.addParam(config);
       });
 
       this.queue = [];
@@ -142,6 +144,18 @@
         ru: "Узнать версию и др. информацию о приложении",
         en: "Check version and other app information",
         uk: "Дізнатися версію та іншу інформацію про додаток",
+      },
+
+      // macOS (системный mpv)
+      app_settings_macos_field_name: {
+        ru: "macOS",
+        en: "macOS",
+        uk: "macOS",
+      },
+      app_settings_macos_field_description: {
+        ru: "Настройки системного mpv",
+        en: "System mpv settings",
+        uk: "Налаштування системного mpv",
       },
 
       // TorrServer
@@ -795,6 +809,8 @@
       </div>`,
     );
 
+    Lampa.Template.add("settings_app_settings_macos", `<div></div>`);
+
     const settingsManager = new SettingsManager("app_settings");
 
     const currentKeyboardType = normalizeKeyboardType(
@@ -981,7 +997,7 @@
       })();
 
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_path",
           type: "button",
@@ -1066,7 +1082,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_uosc",
           type: "trigger",
@@ -1106,7 +1122,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_fullscreen",
           type: "trigger",
@@ -1128,7 +1144,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_esc_quits",
           type: "trigger",
@@ -1152,7 +1168,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_quality",
           type: "select",
@@ -1194,7 +1210,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_smooth_motion",
           type: "trigger",
@@ -1232,7 +1248,7 @@
         },
       });
       Lampa.SettingsApi.addParam({
-        component: "app_settings",
+        component: "app_settings_macos",
         param: {
           name: "mpv_custom_args",
           type: "input",
@@ -1702,6 +1718,27 @@
             Lampa.Settings.create("app_settings_ts", {
               onBack: () => Lampa.Settings.create("app_settings"),
             });
+          },
+        })
+        .addToQueue({
+          order: 8.1,
+          param: {
+            name: "app_settings_macos",
+            type: "button",
+          },
+          field: {
+            name: Lampa.Lang.translate("app_settings_macos_field_name"),
+            description: Lampa.Lang.translate(
+              "app_settings_macos_field_description",
+            ),
+          },
+          onChange: () => {
+            Lampa.Settings.create("app_settings_macos", {
+              onBack: () => Lampa.Settings.create("app_settings"),
+            });
+          },
+          onRender: function (element) {
+            if (!Lampa.Platform.macOS()) element.hide();
           },
         })
         .addToQueue({
