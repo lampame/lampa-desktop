@@ -107,6 +107,74 @@ function registerMpvHandlers(getMainWindow) {
     }
   });
 
+  ipcMain.handle("mpv-get-quality", async () => {
+    try {
+      return await mpvManager.getQualityInfo();
+    } catch (err) {
+      console.error("❌ [mpv] mpv-get-quality:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-set-quality", async (event, level) => {
+    try {
+      return { success: true, ...(await mpvManager.setQualityEnabled(level)) };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-set-quality:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-get-smooth-motion", async () => {
+    try {
+      const store = require("../storeManager");
+      return {
+        success: true,
+        enabled: Boolean(store.get("mpvSmoothMotion", false)),
+      };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-get-smooth-motion:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-set-smooth-motion", async (event, enabled) => {
+    try {
+      return {
+        success: true,
+        ...(await mpvManager.setSmoothMotionEnabled(enabled)),
+      };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-set-smooth-motion:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-get-custom-args", async () => {
+    try {
+      const store = require("../storeManager");
+      return {
+        success: true,
+        customArgs: store.get("mpvCustomArgs", ""),
+      };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-get-custom-args:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("mpv-set-custom-args", async (event, customArgs) => {
+    try {
+      return {
+        success: true,
+        ...(await mpvManager.setCustomArgsEnabled(customArgs)),
+      };
+    } catch (err) {
+      console.error("❌ [mpv] mpv-set-custom-args:", err.message);
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle("mpv-get-fullscreen", async () => {
     try {
       const store = require("../storeManager");

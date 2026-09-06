@@ -31,6 +31,9 @@ const store = new Store({
     mpvUosc: true,
     mpvFullscreen: true,
     mpvEscQuits: true,
+    mpvQuality: "balanced",
+    mpvSmoothMotion: false,
+    mpvCustomArgs: "",
   },
 });
 

@@ -175,6 +175,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getFullscreen: () => ipcRenderer.invoke("mpv-get-fullscreen"),
     setFullscreen: (enabled) =>
       ipcRenderer.invoke("mpv-set-fullscreen", enabled),
+    getQuality: () => ipcRenderer.invoke("mpv-get-quality"),
+    setQuality: (level) => ipcRenderer.invoke("mpv-set-quality", level),
+    getSmoothMotion: () => ipcRenderer.invoke("mpv-get-smooth-motion"),
+    setSmoothMotion: (enabled) =>
+      ipcRenderer.invoke("mpv-set-smooth-motion", enabled),
+    getCustomArgs: () => ipcRenderer.invoke("mpv-get-custom-args"),
+    setCustomArgs: (customArgs) =>
+      ipcRenderer.invoke("mpv-set-custom-args", customArgs),
     getEscQuits: () => ipcRenderer.invoke("mpv-get-esc-quits"),
     setEscQuits: (enabled) => ipcRenderer.invoke("mpv-set-esc-quits", enabled),
     onTime: (callback) => {

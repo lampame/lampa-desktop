@@ -607,6 +607,56 @@
         en: "Remap ESC from exiting fullscreen to quitting mpv entirely. Applies on next launch.",
         uk: "Перепризначити ESC з виходу з повноекранного режиму на повне закриття mpv. Застосовується при наступному запуску.",
       },
+      mpv_quality_title: {
+        ru: "Качество видео",
+        en: "Video quality",
+        uk: "Якість відео",
+      },
+      mpv_quality_description: {
+        ru: "Уровень апскейла mpv. Применяется при следующем запуске видео.",
+        en: "mpv upscale level. Applies on next video launch.",
+        uk: "Рівень апскейлу mpv. Застосовується при наступному запуску відео.",
+      },
+      mpv_quality_off: {
+        ru: "Выключено",
+        en: "Off",
+        uk: "Вимкнено",
+      },
+      mpv_quality_balanced: {
+        ru: "Сбалансированное",
+        en: "Balanced",
+        uk: "Збалансована",
+      },
+      mpv_quality_quality: {
+        ru: "Максимальное",
+        en: "Maximum",
+        uk: "Максимальна",
+      },
+      mpv_smooth_motion_title: {
+        ru: "Плавное движение (interpolation)",
+        en: "Smooth motion (interpolation)",
+        uk: "Плавний рух (interpolation)",
+      },
+      mpv_smooth_motion_description: {
+        ru: "Для фиксированных 60Гц экранов. Не рекомендуется для ProMotion/VRR и Bluetooth-аудио. Применяется при следующем запуске.",
+        en: "For fixed 60Hz screens. Not recommended for ProMotion/VRR and Bluetooth audio. Applies on next launch.",
+        uk: "Для фіксованих 60Гц екранів. Не рекомендується для ProMotion/VRR та Bluetooth-аудіо. Застосовується при наступному запуску.",
+      },
+      mpv_custom_args_title: {
+        ru: "Дополнительные флаги mpv",
+        en: "Additional mpv flags",
+        uk: "Додаткові прапори mpv",
+      },
+      mpv_custom_args_description: {
+        ru: "Свои --флаги поверх профиля. Неверный флаг игнорируется с логом.",
+        en: "Custom --flags on top of the profile. An invalid flag is ignored with a log.",
+        uk: "Власні --прапори поверх профілю. Невалідний прапор ігнорується з логом.",
+      },
+      mpv_quality_applied: {
+        ru: "Качество mpv: {level}",
+        en: "mpv quality: {level}",
+        uk: "Якість mpv: {level}",
+      },
       app_settings_keyboard_section: {
         ru: "Выбор клавиатуры",
         en: "Keyboard selection",
@@ -1101,6 +1151,141 @@
           }
         },
       });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_quality",
+          type: "select",
+          values: {
+            off: Lampa.Lang.translate("mpv_quality_off"),
+            balanced: Lampa.Lang.translate("mpv_quality_balanced"),
+            quality: Lampa.Lang.translate("mpv_quality_quality"),
+          },
+          default: Lampa.Storage.get("mpv_quality", "balanced"),
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_quality_title"),
+          description: Lampa.Lang.translate("mpv_quality_description"),
+        },
+        onChange: async function (value) {
+          try {
+            Lampa.Storage.set("mpv_quality", value);
+            var mpv = window.electronAPI && window.electronAPI.mpv;
+            if (mpv && typeof mpv.setQuality === "function") {
+              var result = await mpv.setQuality(value);
+              if (!result || result.success === false) {
+                throw new Error(
+                  (result && result.error) || "setQuality failed",
+                );
+              }
+            }
+            Lampa.Noty.show(
+              Lampa.Lang.translate("mpv_quality_applied").replace(
+                "{level}",
+                value,
+              ),
+              "success",
+              2000,
+            );
+          } catch (err) {
+            console.error("APP Failed to set mpv quality", err);
+            Lampa.Noty.show(Lampa.Lang.translate("app_error"), "error", 3000);
+          }
+        },
+      });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_smooth_motion",
+          type: "trigger",
+          default: Boolean(Lampa.Storage.get("mpv_smooth_motion", false)),
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_smooth_motion_title"),
+          description: Lampa.Lang.translate("mpv_smooth_motion_description"),
+        },
+        onChange: async function (value) {
+          try {
+            var enabled = value === "true";
+            Lampa.Storage.set("mpv_smooth_motion", enabled);
+            var mpv = window.electronAPI && window.electronAPI.mpv;
+            if (mpv && typeof mpv.setSmoothMotion === "function") {
+              var result = await mpv.setSmoothMotion(enabled);
+              if (!result || result.success === false) {
+                throw new Error(
+                  (result && result.error) || "setSmoothMotion failed",
+                );
+              }
+            }
+            Lampa.Noty.show(
+              Lampa.Lang.translate("mpv_quality_applied").replace(
+                "{level}",
+                String(enabled),
+              ),
+              "success",
+              2000,
+            );
+          } catch (err) {
+            console.error("APP Failed to set mpv smooth motion", err);
+            Lampa.Noty.show(Lampa.Lang.translate("app_error"), "error", 3000);
+          }
+        },
+      });
+      Lampa.SettingsApi.addParam({
+        component: "app_settings",
+        param: {
+          name: "mpv_custom_args",
+          type: "input",
+          values: Lampa.Storage.get("mpv_custom_args", ""),
+        },
+        field: {
+          name: Lampa.Lang.translate("mpv_custom_args_title"),
+          description: Lampa.Lang.translate("mpv_custom_args_description"),
+        },
+        onChange: async function (value) {
+          try {
+            var raw = typeof value === "string" ? value : "";
+            Lampa.Storage.set("mpv_custom_args", raw);
+            var mpv = window.electronAPI && window.electronAPI.mpv;
+            if (mpv && typeof mpv.setCustomArgs === "function") {
+              var result = await mpv.setCustomArgs(raw);
+              if (!result || result.success === false) {
+                throw new Error(
+                  (result && result.error) || "setCustomArgs failed",
+                );
+              }
+            }
+            Lampa.Noty.show(
+              Lampa.Lang.translate("mpv_quality_applied").replace(
+                "{level}",
+                raw || "—",
+              ),
+              "success",
+              2000,
+            );
+          } catch (err) {
+            console.error("APP Failed to set mpv custom args", err);
+            Lampa.Noty.show(Lampa.Lang.translate("app_error"), "error", 3000);
+          }
+        },
+      });
+      (async function syncMpvQualitySettings() {
+        try {
+          var mpv = window.electronAPI && window.electronAPI.mpv;
+          if (!mpv || typeof mpv.getQuality !== "function") return;
+          var info = await mpv.getQuality();
+          if (!info || info.success === false) return;
+          if (info.level) Lampa.Storage.set("mpv_quality", info.level);
+          if (typeof info.smoothMotion === "boolean") {
+            Lampa.Storage.set("mpv_smooth_motion", info.smoothMotion);
+          }
+          if (typeof info.customArgs === "string") {
+            Lampa.Storage.set("mpv_custom_args", info.customArgs);
+          }
+        } catch (err) {
+          console.error("APP Failed to sync mpv quality settings:", err);
+        }
+      })();
     }
 
     Promise.all([
@@ -3294,8 +3479,8 @@
     );
   }
 
-  // Intercept Lampa.Player for system mpv (macOS, JSON IPC).
-  // playlist() arrives as a separate call after play(), so aggregate via setTimeout 0.
+  // Intercept Player for system mpv. playlist() comes separately after
+  // play(), so aggregate via setTimeout 0.
   function initMpvHook() {
     if (initMpvHook.done) return;
     if (
@@ -3316,9 +3501,8 @@
     var pendingPlay = null;
     var pendingList = null;
     var playTimer = null;
-    // urls of the serial currently handed to mpv. When Lampa calls
-    // Player.play again for one of them (episode pick / next / prev in the
-    // Lampa UI), we must NOT restart mpv — just switch the track.
+    // Serial urls handed to mpv; a later play() for one of them switches
+    // the track instead of restarting the process.
     var activePlaylistUrls = null;
 
     function cleanPlaylist(list) {
@@ -3385,9 +3569,6 @@
     }
 
     // Human-readable episode title from Lampa client fields.
-    // torrent.js provides title ("5 / Назва серії"), fname (episode name),
-    // first_title (show name) and card (TMDB card); episode.js provides
-    // title = name || 'Серія N'. Falls back to "Show - SxxExx - name".
     function buildDisplayTitle(item) {
       if (!item || typeof item !== "object") return "";
       var t = typeof item.title === "string" ? item.title.trim() : "";
@@ -3421,24 +3602,14 @@
       return "";
     }
 
-    // Ensure a playlist item carries a usable timeline object (with hash and
-    // a live Lampa handler).
-    //
-    // If Lampa already put a timeline.hash on the item — TRUST IT and keep
-    // that exact hash: re-deriving it from season/episode/title here is how
-    // progress used to get written under a wrong key (Lampa hashes episodes
-    // differently depending on the module that opened them). We only make
-    // sure a live handler exists by taking Timeline.view(hash).
-    //
-    // Only when the item truly has no hash do we fall back to candidate
-    // hashes like Lampa computes them (mirroring dev/mpv.js).
+    // Ensure a playlist item has a usable timeline (hash + live handler).
+    // Trust an existing timeline.hash; derive candidates only when missing.
     function ensureItemTimeline(item, card) {
       if (!item || typeof item !== "object") return;
       var tl =
         item.timeline && typeof item.timeline === "object"
           ? item.timeline
           : null;
-      // Already has both hash and a live handler — nothing to do.
       if (tl && tl.hash != null && typeof tl.handler === "function") return;
       if (
         !window.Lampa ||
@@ -3447,8 +3618,6 @@
       )
         return;
 
-      // Case 1: Lampa gave us a hash. Take a fresh view of THAT hash so we
-      // get a live handler, preserving any client-provided position.
       if (tl && tl.hash != null) {
         var fixed = Lampa.Timeline.view(String(tl.hash));
         if (fixed) {
@@ -3467,7 +3636,6 @@
       var e = Number(item.episode_number ?? item.e ?? item.episode ?? item.num);
       var isSeries = Number.isFinite(s) && s > 0 && Number.isFinite(e) && e > 0;
 
-      // Collect every title variant Lampa may have hashed the item under.
       var names = [];
       var pushName = function (v) {
         if (typeof v === "string" && v && names.indexOf(v) === -1)
@@ -3494,7 +3662,6 @@
       pushName(item.title);
       if (names.length === 0) names.push("media");
 
-      // Build candidate hashes and pick one that already stores progress.
       var candidates = [];
       var seen = {};
       var add = function (h) {
@@ -3529,7 +3696,6 @@
         if (!chosen) chosen = { time: 0, percent: 0, duration: 0 };
         chosen.hash = candidates[0];
       }
-      // Preserve any client-provided position fields.
       if (tl) {
         if (tl.time != null && Number(tl.time) > 0)
           chosen.time = Number(tl.time);
@@ -3569,21 +3735,6 @@
     }
 
     function sendToMpv(data, list) {
-      console.log(
-        "[mpv-hook] sendToMpv url=",
-        data && data.url,
-        " list=",
-        Array.isArray(list) ? list.length : "n/a",
-        " titles=",
-        Array.isArray(list)
-          ? list
-              .slice(0, 3)
-              .map(function (i) {
-                return i && i.title;
-              })
-              .join(" | ")
-          : "",
-      );
       if (
         !data ||
         typeof data.url !== "string" ||
@@ -3598,17 +3749,12 @@
       }
       var cleaned = cleanPlaylist(list);
 
-      // Episode pick / next / prev from the Lampa UI ends here as ANOTHER
-      // Player.play call for an episode of the serial that mpv is already
-      // playing. Restarting mpv for that would kill the process and lose the
-      // playlist; instead switch the track in place.
+      // A play() for an episode mpv already has: switch track, not restart.
       var known =
         typeof mpv.playUrl === "function" &&
         !!activePlaylistUrls &&
         activePlaylistUrls.indexOf(data.url) !== -1;
       if (known) {
-        // Ensure the newly chosen episode still has a hash/handler before
-        // asking mpv to switch to it.
         ensureItemTimeline(data, data.card || data.movie || data);
         cleaned.forEach(function (item) {
           ensureItemTimeline(item, data.card || data.movie || data);
@@ -3627,23 +3773,16 @@
       }
 
       var launchCard = data.card || data.movie || data;
-      // Make sure EVERY item knows its Lampa hash/handler, not just the
-      // launch episode — otherwise progress for later episodes (auto-next /
-      // mpv prev/next) cannot be written back.
       ensureItemTimeline(data, launchCard);
       cleaned.forEach(function (item) {
         ensureItemTimeline(item, launchCard);
       });
-      // start/hash must be read AFTER ensureItemTimeline: if Lampa did not
-      // attach a timeline to the launch item, ensureItemTimeline derives it
-      // from Timeline.view(hash) (which carries the saved position).
+      // Read start/hash after ensureItemTimeline (it may derive the timeline).
       var tl =
         data.timeline && typeof data.timeline === "object" ? data.timeline : {};
       var start = Number(tl.time) || 0;
       var hash = tl.hash || null;
       if (cleaned.length) origPlaylist(cleaned);
-      // Remember the serial we handed to mpv so a later Player.play for one
-      // of its episodes switches the track instead of restarting the process.
       activePlaylistUrls = cleaned.map(function (it) {
         return it.url;
       });
@@ -3717,7 +3856,7 @@
       return origPlaylist(list);
     };
 
-    // mpv -> Lampa: timecodes and playback end (throttled on the main side)
+    // mpv -> Lampa: timecodes and playback end.
     try {
       var mpvApi = window.electronAPI && window.electronAPI.mpv;
       if (mpvApi) {
@@ -3726,10 +3865,6 @@
             if (!progress) return;
             var hash = progress.hash;
             if (hash == null) return;
-            // Deliver straight into Lampa's timeline, the same way the
-            // reference desktop client does (Timeline.update + timeCall):
-            // no handler registry, no index lookups — the main process has
-            // already resolved the hash of the episode that is playing.
             var data = {
               hash: String(hash),
               time: Math.round(Number(progress.time) || 0),
@@ -3754,15 +3889,10 @@
         }
         if (typeof mpvApi.onEnded === "function") {
           mpvApi.onEnded(function (info) {
-            // autoNext=true means mpv already advanced to the next episode
-            // on its own — Lampa must NOT tear down the playlist here.
             if (info && info.autoNext === true) return;
-            // Playback of the serial finished / mpv was closed. A fresh
-            // Player.play for the same title must restart mpv, not playAt.
             activePlaylistUrls = null;
-            if (Lampa.Player.listener) {
-              Lampa.Player.listener.send("destroy", {});
-            }
+            // No listener.send('destroy'): inner player destroy would flush
+            // an empty work.timeline over the position saved via mpv-time.
           });
         }
       }
